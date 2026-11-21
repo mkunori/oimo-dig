@@ -10,12 +10,20 @@ using UnityEngine.UI;
 public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPointerUpHandler
 {
     private const int InitialRequiredDigAmount = 10;
-    private const int ShovelUpgradePrice = 3;
-    private const int UpgradedDigPower = 2;
+    private const int AutoDigUnlockHarvests = 5;
+    private const int AutoDigPrice = 2;
     private const double DigInterval = 0.25;
+    private const double AutoDigInterval = 1.0;
     private const double HarvestAnimationDuration = 0.18;
     private const float FullDigLift = 0.35f;
     private const float HarvestJumpHeight = 0.45f;
+
+    private static readonly (int Price, int Power)[] ShovelUpgrades =
+    {
+        (3, 2),
+        (5, 4),
+        (8, 8)
+    };
 
     [SerializeField] private Slider digProgressSlider;
     [SerializeField] private TMP_Text digAmountText;
@@ -26,13 +34,18 @@ public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPoin
     [SerializeField] private TMP_Text shovelDetailsText;
     [SerializeField] private Button buyShovelButton;
     [SerializeField] private TMP_Text buyShovelButtonText;
+    [SerializeField] private GameObject autoDigSection;
+    [SerializeField] private Button buyAutoDigButton;
+    [SerializeField] private TMP_Text buyAutoDigButtonText;
 
     private int digProgress;
     private int requiredDigAmount = InitialRequiredDigAmount;
-    private int digPower = 1;
+    private int shovelLevel;
     private int harvestedCount;
     private int ownedPotatoes;
+    private bool autoDigPurchased;
     private double nextDigTime;
+    private double? nextAutoDigTime;
     private Vector3 buriedLocalPosition;
     private double? harvestAnimationStart;
 
@@ -42,13 +55,28 @@ public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPoin
     private TouchControl heldTouch;
     private double heldTouchStartTime;
 
+#if UNITY_WEBGL && !UNITY_EDITOR
+    [System.Runtime.InteropServices.DllImport("__Internal")]
+    private static extern int OimoDigGetPageVisibility();
+    private int pageVisibility;
+#else
+    private bool applicationPaused;
+#endif
+
+    private int DigPower => shovelLevel == 0 ? 1 : ShovelUpgrades[shovelLevel - 1].Power;
+    private bool ShovelAtMaxLevel => shovelLevel == ShovelUpgrades.Length;
+    private bool CanBuyShovel => !ShovelAtMaxLevel && ownedPotatoes >= ShovelUpgrades[shovelLevel].Price;
+    private bool AutoDigUnlocked => harvestedCount >= AutoDigUnlockHarvests;
+    private bool CanBuyAutoDig => AutoDigUnlocked && !autoDigPurchased && ownedPotatoes >= AutoDigPrice;
+
     private void Awake()
     {
         if (digProgressSlider == null || digAmountText == null || harvestCountText == null ||
             ownedPotatoesText == null || upgradePanel == null || shovelDetailsText == null ||
-            buyShovelButton == null || buyShovelButtonText == null)
+            buyShovelButton == null || buyShovelButtonText == null || autoDigSection == null ||
+            buyAutoDigButton == null || buyAutoDigButtonText == null)
         {
-            Debug.LogError("Assign the digging HUD and shovel upgrade UI references on DiggingPrototype.", this);
+            Debug.LogError("Assign the digging HUD and upgrade UI references on DiggingPrototype.", this);
             enabled = false;
             return;
         }
@@ -69,17 +97,28 @@ public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPoin
 
     public void BuyShovelUpgrade()
     {
-        if (!isActiveAndEnabled || digPower == UpgradedDigPower || ownedPotatoes < ShovelUpgradePrice)
+        if (!isActiveAndEnabled || !CanBuyShovel)
             return;
 
-        ownedPotatoes -= ShovelUpgradePrice;
-        digPower = UpgradedDigPower;
+        ownedPotatoes -= ShovelUpgrades[shovelLevel].Price;
+        shovelLevel++;
+        RefreshInventoryDisplay();
+    }
+
+    public void BuyAutoDig()
+    {
+        if (!isActiveAndEnabled || !CanBuyAutoDig)
+            return;
+
+        ownedPotatoes -= AutoDigPrice;
+        autoDigPurchased = true;
+        nextAutoDigTime = Time.unscaledTimeAsDouble + AutoDigInterval;
         RefreshInventoryDisplay();
     }
 
     public void OnPointerDown(PointerEventData eventData)
     {
-        if (!isActiveAndEnabled || !Application.isFocused || heldDevice != null ||
+        if (!isActiveAndEnabled || !Application.isFocused || !IsDiggingAvailable() || heldDevice != null ||
             eventData.button != PointerEventData.InputButton.Left ||
             !(eventData is ExtendedPointerEventData pointer))
         {
@@ -113,7 +152,7 @@ public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPoin
         heldDevice = pointer.device;
         heldPointerId = pointer.pointerId;
         heldTouchId = pointer.touchId;
-        TryDig(Time.unscaledTimeAsDouble);
+        TryManualDig(Time.unscaledTimeAsDouble);
     }
 
     public void OnPointerUp(PointerEventData eventData)
@@ -131,17 +170,23 @@ public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPoin
         double now = Time.unscaledTimeAsDouble;
         UpdateHarvestAnimation(now);
 
-        if (heldDevice == null)
-            return;
-
-        // Read the same pointer after EventSystem has processed this frame's releases.
-        if (!Application.isFocused || !heldDevice.added || !IsHeldPointerPressed())
+        if (!IsDiggingAvailable())
         {
-            ReleaseHold();
+            SuspendDigging();
             return;
         }
 
-        TryDig(now);
+        // Read the same pointer after EventSystem has processed this frame's releases.
+        if (heldDevice != null)
+        {
+            if (Application.isFocused && heldDevice.added && IsHeldPointerPressed())
+                TryManualDig(now);
+            else
+                ReleaseHold();
+        }
+
+        if (autoDigPurchased)
+            TryAutoDig(now);
     }
 
     private bool IsHeldPointerPressed()
@@ -155,15 +200,30 @@ public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPoin
                heldTouch.startTime.ReadValue() == heldTouchStartTime;
     }
 
-    private void TryDig(double now)
+    private void TryManualDig(double now)
     {
         if (now < nextDigTime)
             return;
 
         // Schedule from this dig so a delayed frame can never cause a burst.
         nextDigTime = now + DigInterval;
+        ApplyDig(now);
+    }
 
-        if (requiredDigAmount - digProgress <= digPower)
+    private void TryAutoDig(double now)
+    {
+        nextAutoDigTime ??= now + AutoDigInterval;
+        if (now < nextAutoDigTime.Value)
+            return;
+
+        nextAutoDigTime = now + AutoDigInterval;
+        ApplyDig(now);
+    }
+
+    private void ApplyDig(double now)
+    {
+        int power = DigPower;
+        if (requiredDigAmount - digProgress <= power)
         {
             harvestedCount++;
             ownedPotatoes++;
@@ -177,7 +237,7 @@ public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPoin
         }
         else
         {
-            digProgress += digPower;
+            digProgress += power;
         }
 
         RefreshDigDisplay();
@@ -248,33 +308,74 @@ public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPoin
     {
         harvestCountText.text = $"収穫累計  {harvestedCount}";
         ownedPotatoesText.text = $"所持芋  {ownedPotatoes}";
-        shovelDetailsText.text = $"現在の掘削力  {digPower}\n強化後の掘削力  {UpgradedDigPower}\n価格  芋 {ShovelUpgradePrice}個";
 
-        bool upgraded = digPower == UpgradedDigPower;
-        buyShovelButton.interactable = !upgraded && ownedPotatoes >= ShovelUpgradePrice;
-        buyShovelButtonText.text = upgraded ? "強化済み" : buyShovelButton.interactable ? "購入" : "芋が不足";
+        shovelDetailsText.text = $"現在の掘削力  {DigPower}";
+        if (!ShovelAtMaxLevel)
+        {
+            var nextUpgrade = ShovelUpgrades[shovelLevel];
+            shovelDetailsText.text += $"\n次の掘削力  {nextUpgrade.Power}\n価格  芋 {nextUpgrade.Price}個";
+        }
+
+        buyShovelButton.interactable = CanBuyShovel;
+        buyShovelButtonText.text = ShovelAtMaxLevel ? "最大レベル" : CanBuyShovel ? "購入" : "芋が不足";
+
+        autoDigSection.SetActive(AutoDigUnlocked);
+        buyAutoDigButton.interactable = CanBuyAutoDig;
+        buyAutoDigButtonText.text = autoDigPurchased ? "稼働中" : CanBuyAutoDig ? "購入" : "芋が不足";
+    }
+
+    private bool IsDiggingAvailable()
+    {
+#if UNITY_WEBGL && !UNITY_EDITOR
+        // A tab can become visible again without the Unity canvas regaining focus.
+        int visibility = OimoDigGetPageVisibility();
+        if (visibility != pageVisibility)
+        {
+            pageVisibility = visibility;
+            SuspendDigging();
+        }
+
+        return visibility > 0;
+#else
+        return Application.isFocused && !applicationPaused;
+#endif
     }
 
     private void OnApplicationFocus(bool hasFocus)
     {
-        if (!hasFocus)
-            ReleaseHold();
+        if (hasFocus)
+            return;
+
+#if UNITY_WEBGL && !UNITY_EDITOR
+        ReleaseHold();
+#else
+        SuspendDigging();
+#endif
     }
 
     private void OnApplicationPause(bool isPaused)
     {
+#if !UNITY_WEBGL || UNITY_EDITOR
+        applicationPaused = isPaused;
+#endif
         if (isPaused)
-            ReleaseHold();
+            SuspendDigging();
     }
 
     private void OnDisable()
     {
-        ReleaseHold();
+        SuspendDigging();
         if (harvestAnimationStart.HasValue)
         {
             harvestAnimationStart = null;
             SetVisualLift(DigLift);
         }
+    }
+
+    private void SuspendDigging()
+    {
+        ReleaseHold();
+        nextAutoDigTime = null;
     }
 
     private void ReleaseHold()
