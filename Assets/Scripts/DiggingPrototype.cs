@@ -1,3 +1,4 @@
+using System;
 using TMPro;
 using UnityEngine;
 using UnityEngine.EventSystems;
@@ -8,18 +9,29 @@ using UnityEngine.UI;
 
 public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPointerUpHandler
 {
-    private const int DigsPerHarvest = 10;
+    private const int InitialRequiredDigAmount = 10;
+    private const int ShovelUpgradePrice = 3;
+    private const int UpgradedDigPower = 2;
     private const double DigInterval = 0.25;
     private const double HarvestAnimationDuration = 0.18;
     private const float FullDigLift = 0.35f;
     private const float HarvestJumpHeight = 0.45f;
 
     [SerializeField] private Slider digProgressSlider;
+    [SerializeField] private TMP_Text digAmountText;
     [SerializeField] private TMP_Text harvestCountText;
+    [SerializeField] private TMP_Text ownedPotatoesText;
     [SerializeField] private Transform potatoVisual;
+    [SerializeField] private GameObject upgradePanel;
+    [SerializeField] private TMP_Text shovelDetailsText;
+    [SerializeField] private Button buyShovelButton;
+    [SerializeField] private TMP_Text buyShovelButtonText;
 
     private int digProgress;
+    private int requiredDigAmount = InitialRequiredDigAmount;
+    private int digPower = 1;
     private int harvestedCount;
+    private int ownedPotatoes;
     private double nextDigTime;
     private Vector3 buriedLocalPosition;
     private double? harvestAnimationStart;
@@ -32,9 +44,11 @@ public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPoin
 
     private void Awake()
     {
-        if (digProgressSlider == null || harvestCountText == null)
+        if (digProgressSlider == null || digAmountText == null || harvestCountText == null ||
+            ownedPotatoesText == null || upgradePanel == null || shovelDetailsText == null ||
+            buyShovelButton == null || buyShovelButtonText == null)
         {
-            Debug.LogError("DiggingPrototype requires a Dig Progress Slider and a Harvest Count Text.", this);
+            Debug.LogError("Assign the digging HUD and shovel upgrade UI references on DiggingPrototype.", this);
             enabled = false;
             return;
         }
@@ -42,7 +56,25 @@ public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPoin
         if (potatoVisual != null)
             buriedLocalPosition = potatoVisual.localPosition;
 
-        RefreshDisplay();
+        upgradePanel.SetActive(false);
+        RefreshDigDisplay();
+        RefreshInventoryDisplay();
+    }
+
+    public void ToggleUpgradePanel()
+    {
+        if (isActiveAndEnabled)
+            upgradePanel.SetActive(!upgradePanel.activeSelf);
+    }
+
+    public void BuyShovelUpgrade()
+    {
+        if (!isActiveAndEnabled || digPower == UpgradedDigPower || ownedPotatoes < ShovelUpgradePrice)
+            return;
+
+        ownedPotatoes -= ShovelUpgradePrice;
+        digPower = UpgradedDigPower;
+        RefreshInventoryDisplay();
     }
 
     public void OnPointerDown(PointerEventData eventData)
@@ -131,23 +163,31 @@ public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPoin
         // Schedule from this dig so a delayed frame can never cause a burst.
         nextDigTime = now + DigInterval;
 
-        digProgress++;
-        if (digProgress == DigsPerHarvest)
+        if (requiredDigAmount - digProgress <= digPower)
         {
             harvestedCount++;
+            ownedPotatoes++;
             digProgress = 0;
+            // ceil(requiredDigAmount * 1.2), using integer arithmetic.
+            requiredDigAmount = (int)Math.Min(int.MaxValue, (requiredDigAmount * 6L + 4) / 5);
             if (potatoVisual != null)
                 harvestAnimationStart = now;
+
+            RefreshInventoryDisplay();
+        }
+        else
+        {
+            digProgress += digPower;
         }
 
-        RefreshDisplay();
+        RefreshDigDisplay();
         if (harvestAnimationStart.HasValue)
             UpdateHarvestAnimation(now);
         else
             SetVisualLift(DigLift);
     }
 
-    private float DigLift => FullDigLift * digProgress / DigsPerHarvest;
+    private float DigLift => FullDigLift * ((float)digProgress / requiredDigAmount);
 
     private void UpdateHarvestAnimation(double now)
     {
@@ -197,10 +237,22 @@ public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPoin
         return distance >= 0f && ray.GetPoint(distance).y >= BuriedWorldPosition.y;
     }
 
-    private void RefreshDisplay()
+    private void RefreshDigDisplay()
     {
+        digProgressSlider.maxValue = requiredDigAmount;
         digProgressSlider.SetValueWithoutNotify(digProgress);
-        harvestCountText.text = $"Harvested: {harvestedCount}";
+        digAmountText.text = $"{digProgress} / {requiredDigAmount}";
+    }
+
+    private void RefreshInventoryDisplay()
+    {
+        harvestCountText.text = $"収穫累計  {harvestedCount}";
+        ownedPotatoesText.text = $"所持芋  {ownedPotatoes}";
+        shovelDetailsText.text = $"現在の掘削力  {digPower}\n強化後の掘削力  {UpgradedDigPower}\n価格  芋 {ShovelUpgradePrice}個";
+
+        bool upgraded = digPower == UpgradedDigPower;
+        buyShovelButton.interactable = !upgraded && ownedPotatoes >= ShovelUpgradePrice;
+        buyShovelButtonText.text = upgraded ? "強化済み" : buyShovelButton.interactable ? "購入" : "芋が不足";
     }
 
     private void OnApplicationFocus(bool hasFocus)
