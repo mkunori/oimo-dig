@@ -10,13 +10,19 @@ public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPoin
 {
     private const int DigsPerHarvest = 10;
     private const double DigInterval = 0.25;
+    private const double HarvestAnimationDuration = 0.18;
+    private const float FullDigLift = 0.35f;
+    private const float HarvestJumpHeight = 0.45f;
 
     [SerializeField] private Slider digProgressSlider;
     [SerializeField] private TMP_Text harvestCountText;
+    [SerializeField] private Transform potatoVisual;
 
     private int digProgress;
     private int harvestedCount;
     private double nextDigTime;
+    private Vector3 buriedLocalPosition;
+    private double? harvestAnimationStart;
 
     private InputDevice heldDevice;
     private int heldPointerId;
@@ -33,6 +39,9 @@ public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPoin
             return;
         }
 
+        if (potatoVisual != null)
+            buriedLocalPosition = potatoVisual.localPosition;
+
         RefreshDisplay();
     }
 
@@ -44,6 +53,9 @@ public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPoin
         {
             return;
         }
+
+        if (potatoVisual != null && !HitsVisiblePotato(eventData))
+            return;
 
         if (pointer.device is Touchscreen touchscreen)
         {
@@ -84,6 +96,9 @@ public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPoin
 
     private void LateUpdate()
     {
+        double now = Time.unscaledTimeAsDouble;
+        UpdateHarvestAnimation(now);
+
         if (heldDevice == null)
             return;
 
@@ -94,7 +109,7 @@ public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPoin
             return;
         }
 
-        TryDig(Time.unscaledTimeAsDouble);
+        TryDig(now);
     }
 
     private bool IsHeldPointerPressed()
@@ -121,9 +136,65 @@ public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPoin
         {
             harvestedCount++;
             digProgress = 0;
+            if (potatoVisual != null)
+                harvestAnimationStart = now;
         }
 
         RefreshDisplay();
+        if (harvestAnimationStart.HasValue)
+            UpdateHarvestAnimation(now);
+        else
+            SetVisualLift(DigLift);
+    }
+
+    private float DigLift => FullDigLift * digProgress / DigsPerHarvest;
+
+    private void UpdateHarvestAnimation(double now)
+    {
+        if (!harvestAnimationStart.HasValue)
+            return;
+
+        float progress = (float)((now - harvestAnimationStart.Value) / HarvestAnimationDuration);
+        if (progress >= 1f)
+        {
+            harvestAnimationStart = null;
+            SetVisualLift(DigLift);
+            return;
+        }
+
+        float lift = Mathf.Lerp(FullDigLift, 0f, progress * progress);
+        float jump = HarvestJumpHeight * Mathf.Sin(Mathf.PI * progress);
+        SetVisualLift(lift + jump);
+    }
+
+    private void SetVisualLift(float lift)
+    {
+        if (potatoVisual != null)
+            potatoVisual.position = BuriedWorldPosition + Vector3.up * lift;
+    }
+
+    private Vector3 BuriedWorldPosition => potatoVisual.parent.TransformPoint(buriedLocalPosition);
+
+    private bool HitsVisiblePotato(PointerEventData eventData)
+    {
+        Camera eventCamera = eventData.enterEventCamera;
+        if (eventCamera == null)
+            return false;
+
+        // The existing box receives pointer events. Test the rendered sphere in its
+        // local space so the empty corners of the box and buried half cannot start a dig.
+        Ray ray = eventCamera.ScreenPointToRay(eventData.position);
+        Matrix4x4 worldToVisual = potatoVisual.worldToLocalMatrix;
+        Vector3 origin = worldToVisual.MultiplyPoint3x4(ray.origin);
+        Vector3 direction = worldToVisual.MultiplyVector(ray.direction);
+        float a = direction.sqrMagnitude;
+        float b = Vector3.Dot(origin, direction);
+        float discriminant = b * b - a * (origin.sqrMagnitude - 0.25f);
+        if (discriminant < 0f)
+            return false;
+
+        float distance = (-b - Mathf.Sqrt(discriminant)) / a;
+        return distance >= 0f && ray.GetPoint(distance).y >= BuriedWorldPosition.y;
     }
 
     private void RefreshDisplay()
@@ -147,6 +218,11 @@ public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPoin
     private void OnDisable()
     {
         ReleaseHold();
+        if (harvestAnimationStart.HasValue)
+        {
+            harvestAnimationStart = null;
+            SetVisualLift(DigLift);
+        }
     }
 
     private void ReleaseHold()
