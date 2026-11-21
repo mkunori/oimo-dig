@@ -46,7 +46,9 @@ public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPoin
     [SerializeField] private TMP_Text harvestCountText;
     [SerializeField] private TMP_Text ownedPotatoesText;
     [SerializeField] private Transform potatoVisual;
+    [SerializeField] private GameObject firstDigHint;
     [SerializeField] private GameObject upgradePanel;
+    [SerializeField] private GameObject firstShovelUpgradeBadge;
     [SerializeField] private TMP_Text shovelDetailsText;
     [SerializeField] private Button buyShovelButton;
     [SerializeField] private TMP_Text buyShovelButtonText;
@@ -94,11 +96,12 @@ public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPoin
     private void Awake()
     {
         if (digProgressSlider == null || digAmountText == null || harvestCountText == null ||
-            ownedPotatoesText == null || upgradePanel == null || shovelDetailsText == null ||
+            ownedPotatoesText == null || firstDigHint == null || upgradePanel == null ||
+            firstShovelUpgradeBadge == null || shovelDetailsText == null ||
             buyShovelButton == null || buyShovelButtonText == null || autoDigSection == null ||
             buyAutoDigButton == null || buyAutoDigButtonText == null)
         {
-            Debug.LogError("Assign the digging HUD and upgrade UI references on DiggingPrototype.", this);
+            Debug.LogError("Assign the digging HUD, onboarding and upgrade UI references on DiggingPrototype.", this);
             enabled = false;
             return;
         }
@@ -130,8 +133,11 @@ public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPoin
 
     public void ToggleUpgradePanel()
     {
-        if (isActiveAndEnabled)
-            upgradePanel.SetActive(!upgradePanel.activeSelf);
+        if (!isActiveAndEnabled)
+            return;
+
+        upgradePanel.SetActive(!upgradePanel.activeSelf);
+        RefreshFirstShovelUpgradeBadge();
     }
 
     public void BuyShovelUpgrade()
@@ -355,6 +361,7 @@ public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPoin
     {
         harvestCountText.text = $"収穫累計  {harvestedCount}";
         ownedPotatoesText.text = $"所持芋  {ownedPotatoes}";
+        firstDigHint.SetActive(harvestedCount == 0);
 
         shovelDetailsText.text = $"現在の掘削力  {DigPower}";
         if (!ShovelAtMaxLevel)
@@ -365,10 +372,16 @@ public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPoin
 
         buyShovelButton.interactable = CanBuyShovel;
         buyShovelButtonText.text = ShovelAtMaxLevel ? "最大レベル" : CanBuyShovel ? "購入" : "芋が不足";
+        RefreshFirstShovelUpgradeBadge();
 
         autoDigSection.SetActive(AutoDigUnlocked);
         buyAutoDigButton.interactable = CanBuyAutoDig;
         buyAutoDigButtonText.text = autoDigPurchased ? "稼働中" : CanBuyAutoDig ? "購入" : "芋が不足";
+    }
+
+    private void RefreshFirstShovelUpgradeBadge()
+    {
+        firstShovelUpgradeBadge.SetActive(shovelLevel == 0 && CanBuyShovel && !upgradePanel.activeSelf);
     }
 
     private void LoadSave()
