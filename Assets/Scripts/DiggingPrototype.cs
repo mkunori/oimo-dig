@@ -14,9 +14,25 @@ public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPoin
     private const int AutoDigPrice = 2;
     private const double DigInterval = 0.25;
     private const double AutoDigInterval = 1.0;
+    private const double AutosaveInterval = 3.0;
     private const double HarvestAnimationDuration = 0.18;
     private const float FullDigLift = 0.35f;
     private const float HarvestJumpHeight = 0.45f;
+    private const string SaveKey = "OimoDig.PrototypeSave";
+    private const int SaveVersion = 1;
+
+    [Serializable]
+    private sealed class SaveData
+    {
+        public int version;
+        public int ownedPotatoes = -1;
+        public int harvestedCount = -1;
+        public int shovelLevel = -1;
+        // A numeric flag lets the loader distinguish "not purchased" from a missing field.
+        public int autoDigPurchased = -1;
+        public int digProgress = -1;
+        public int requiredDigAmount = -1;
+    }
 
     private static readonly (int Price, int Power)[] ShovelUpgrades =
     {
@@ -48,6 +64,8 @@ public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPoin
     private double? nextAutoDigTime;
     private Vector3 buriedLocalPosition;
     private double? harvestAnimationStart;
+    private bool saveDirty;
+    private double nextAutosaveTime;
 
     private InputDevice heldDevice;
     private int heldPointerId;
@@ -58,6 +76,10 @@ public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPoin
 #if UNITY_WEBGL && !UNITY_EDITOR
     [System.Runtime.InteropServices.DllImport("__Internal")]
     private static extern int OimoDigGetPageVisibility();
+    [System.Runtime.InteropServices.DllImport("__Internal")]
+    private static extern void OimoDigSetPageSaveCallback(Action callback);
+    private static readonly Action WebSaveCallback = SaveFromBrowser;
+    private static DiggingPrototype webSaveOwner;
     private int pageVisibility;
 #else
     private bool applicationPaused;
@@ -84,10 +106,27 @@ public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPoin
         if (potatoVisual != null)
             buriedLocalPosition = potatoVisual.localPosition;
 
+        LoadSave();
         upgradePanel.SetActive(false);
         RefreshDigDisplay();
         RefreshInventoryDisplay();
+        SetVisualLift(DigLift);
     }
+
+#if UNITY_WEBGL && !UNITY_EDITOR
+    private void OnEnable()
+    {
+        webSaveOwner = this;
+        OimoDigSetPageSaveCallback(WebSaveCallback);
+    }
+
+    [AOT.MonoPInvokeCallback(typeof(Action))]
+    private static void SaveFromBrowser()
+    {
+        if (webSaveOwner != null)
+            webSaveOwner.SaveIfDirty();
+    }
+#endif
 
     public void ToggleUpgradePanel()
     {
@@ -103,6 +142,7 @@ public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPoin
         ownedPotatoes -= ShovelUpgrades[shovelLevel].Price;
         shovelLevel++;
         RefreshInventoryDisplay();
+        RequestSave(Time.unscaledTimeAsDouble, immediately: true);
     }
 
     public void BuyAutoDig()
@@ -114,6 +154,7 @@ public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPoin
         autoDigPurchased = true;
         nextAutoDigTime = Time.unscaledTimeAsDouble + AutoDigInterval;
         RefreshInventoryDisplay();
+        RequestSave(Time.unscaledTimeAsDouble, immediately: true);
     }
 
     public void OnPointerDown(PointerEventData eventData)
@@ -187,6 +228,9 @@ public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPoin
 
         if (autoDigPurchased)
             TryAutoDig(now);
+
+        if (saveDirty && now >= nextAutosaveTime)
+            SaveIfDirty();
     }
 
     private bool IsHeldPointerPressed()
@@ -223,7 +267,8 @@ public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPoin
     private void ApplyDig(double now)
     {
         int power = DigPower;
-        if (requiredDigAmount - digProgress <= power)
+        bool harvested = requiredDigAmount - digProgress <= power;
+        if (harvested)
         {
             harvestedCount++;
             ownedPotatoes++;
@@ -245,6 +290,8 @@ public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPoin
             UpdateHarvestAnimation(now);
         else
             SetVisualLift(DigLift);
+
+        RequestSave(now, immediately: harvested);
     }
 
     private float DigLift => FullDigLift * ((float)digProgress / requiredDigAmount);
@@ -324,6 +371,83 @@ public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPoin
         buyAutoDigButtonText.text = autoDigPurchased ? "稼働中" : CanBuyAutoDig ? "購入" : "芋が不足";
     }
 
+    private void LoadSave()
+    {
+        if (!PlayerPrefs.HasKey(SaveKey))
+            return;
+
+        var data = new SaveData();
+        try
+        {
+            JsonUtility.FromJsonOverwrite(PlayerPrefs.GetString(SaveKey), data);
+        }
+        catch (ArgumentException)
+        {
+            Debug.LogWarning("OIMO-DIG could not read the local save. Starting with default progress.", this);
+            return;
+        }
+
+        if (data.version != SaveVersion || data.harvestedCount < 0 ||
+            data.ownedPotatoes < 0 || data.ownedPotatoes > data.harvestedCount ||
+            data.shovelLevel < 0 || data.shovelLevel > ShovelUpgrades.Length ||
+            data.autoDigPurchased < 0 || data.autoDigPurchased > 1 ||
+            (data.autoDigPurchased == 1 && data.harvestedCount < AutoDigUnlockHarvests) ||
+            data.requiredDigAmount < InitialRequiredDigAmount ||
+            data.digProgress < 0 || data.digProgress >= data.requiredDigAmount)
+        {
+            Debug.LogWarning("OIMO-DIG local save is invalid or uses an unsupported version. Starting with default progress.", this);
+            return;
+        }
+
+        ownedPotatoes = data.ownedPotatoes;
+        harvestedCount = data.harvestedCount;
+        shovelLevel = data.shovelLevel;
+        autoDigPurchased = data.autoDigPurchased == 1;
+        digProgress = data.digProgress;
+        requiredDigAmount = data.requiredDigAmount;
+    }
+
+    private void RequestSave(double now, bool immediately)
+    {
+        if (!saveDirty)
+        {
+            saveDirty = true;
+            nextAutosaveTime = now + AutosaveInterval;
+        }
+
+        if (immediately)
+            SaveIfDirty();
+    }
+
+    private void SaveIfDirty()
+    {
+        if (!saveDirty)
+            return;
+
+        var data = new SaveData
+        {
+            version = SaveVersion,
+            ownedPotatoes = ownedPotatoes,
+            harvestedCount = harvestedCount,
+            shovelLevel = shovelLevel,
+            autoDigPurchased = autoDigPurchased ? 1 : 0,
+            digProgress = digProgress,
+            requiredDigAmount = requiredDigAmount
+        };
+
+        try
+        {
+            PlayerPrefs.SetString(SaveKey, JsonUtility.ToJson(data));
+            PlayerPrefs.Save();
+            saveDirty = false;
+        }
+        catch (PlayerPrefsException exception)
+        {
+            nextAutosaveTime = Time.unscaledTimeAsDouble + AutosaveInterval;
+            Debug.LogWarning($"OIMO-DIG could not write the local save: {exception.Message}", this);
+        }
+    }
+
     private bool IsDiggingAvailable()
     {
 #if UNITY_WEBGL && !UNITY_EDITOR
@@ -333,6 +457,8 @@ public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPoin
         {
             pageVisibility = visibility;
             SuspendDigging();
+            if (visibility < 0)
+                SaveIfDirty();
         }
 
         return visibility > 0;
@@ -351,6 +477,7 @@ public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPoin
 #else
         SuspendDigging();
 #endif
+        SaveIfDirty();
     }
 
     private void OnApplicationPause(bool isPaused)
@@ -359,11 +486,22 @@ public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPoin
         applicationPaused = isPaused;
 #endif
         if (isPaused)
+        {
             SuspendDigging();
+            SaveIfDirty();
+        }
     }
 
     private void OnDisable()
     {
+        SaveIfDirty();
+#if UNITY_WEBGL && !UNITY_EDITOR
+        if (webSaveOwner == this)
+        {
+            OimoDigSetPageSaveCallback(null);
+            webSaveOwner = null;
+        }
+#endif
         SuspendDigging();
         if (harvestAnimationStart.HasValue)
         {
