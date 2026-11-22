@@ -16,7 +16,7 @@ public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPoin
     private const double AutoDigInterval = 1.0;
     private const double AutosaveInterval = 3.0;
     private const double HarvestAnimationDuration = 0.18;
-    private const float FullDigLift = 0.35f;
+    private const float FullDigLift = 0.53f;
     private const float HarvestJumpHeight = 0.45f;
     private const string SaveKey = "OimoDig.PrototypeSave";
     private const int SaveVersion = 1;
@@ -46,6 +46,7 @@ public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPoin
     [SerializeField] private TMP_Text harvestCountText;
     [SerializeField] private TMP_Text ownedPotatoesText;
     [SerializeField] private Transform potatoVisual;
+    [SerializeField] private DiggingFeedback diggingFeedback;
     [SerializeField] private GameObject firstDigHint;
     [SerializeField] private GameObject upgradePanel;
     [SerializeField] private GameObject firstShovelUpgradeBadge;
@@ -65,6 +66,8 @@ public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPoin
     private double nextDigTime;
     private double? nextAutoDigTime;
     private Vector3 buriedLocalPosition;
+    private Quaternion buriedLocalRotation;
+    private double? digWobbleStart;
     private double? harvestAnimationStart;
     private bool saveDirty;
     private double nextAutosaveTime;
@@ -107,7 +110,10 @@ public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPoin
         }
 
         if (potatoVisual != null)
+        {
             buriedLocalPosition = potatoVisual.localPosition;
+            buriedLocalRotation = potatoVisual.localRotation;
+        }
 
         LoadSave();
         upgradePanel.SetActive(false);
@@ -172,7 +178,8 @@ public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPoin
             return;
         }
 
-        if (potatoVisual != null && !HitsVisiblePotato(eventData))
+        // The raycaster hits the actual potato mesh or the soil in front of it.
+        if (potatoVisual == null || eventData.pointerCurrentRaycast.gameObject != potatoVisual.gameObject)
             return;
 
         if (pointer.device is Touchscreen touchscreen)
@@ -216,6 +223,7 @@ public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPoin
     {
         double now = Time.unscaledTimeAsDouble;
         UpdateHarvestAnimation(now);
+        UpdateDigWobble(now);
 
         if (!IsDiggingAvailable())
         {
@@ -274,10 +282,13 @@ public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPoin
     {
         int power = DigPower;
         bool harvested = requiredDigAmount - digProgress <= power;
+        int earnedPotatoes = 0;
         if (harvested)
         {
             harvestedCount++;
+            int previousBalance = ownedPotatoes;
             ownedPotatoes++;
+            earnedPotatoes = ownedPotatoes - previousBalance;
             digProgress = 0;
             // ceil(requiredDigAmount * 1.2), using integer arithmetic.
             requiredDigAmount = (int)Math.Min(int.MaxValue, (requiredDigAmount * 6L + 4) / 5);
@@ -292,6 +303,10 @@ public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPoin
         }
 
         RefreshDigDisplay();
+        digWobbleStart = now;
+        UpdateDigWobble(now);
+        if (diggingFeedback != null)
+            diggingFeedback.PlayDig(earnedPotatoes);
         if (harvestAnimationStart.HasValue)
             UpdateHarvestAnimation(now);
         else
@@ -328,26 +343,21 @@ public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPoin
 
     private Vector3 BuriedWorldPosition => potatoVisual.parent.TransformPoint(buriedLocalPosition);
 
-    private bool HitsVisiblePotato(PointerEventData eventData)
+    private void UpdateDigWobble(double now)
     {
-        Camera eventCamera = eventData.enterEventCamera;
-        if (eventCamera == null)
-            return false;
+        if (potatoVisual == null || !digWobbleStart.HasValue)
+            return;
 
-        // The existing box receives pointer events. Test the rendered sphere in its
-        // local space so the empty corners of the box and buried half cannot start a dig.
-        Ray ray = eventCamera.ScreenPointToRay(eventData.position);
-        Matrix4x4 worldToVisual = potatoVisual.worldToLocalMatrix;
-        Vector3 origin = worldToVisual.MultiplyPoint3x4(ray.origin);
-        Vector3 direction = worldToVisual.MultiplyVector(ray.direction);
-        float a = direction.sqrMagnitude;
-        float b = Vector3.Dot(origin, direction);
-        float discriminant = b * b - a * (origin.sqrMagnitude - 0.25f);
-        if (discriminant < 0f)
-            return false;
+        float t = (float)((now - digWobbleStart.Value) / 0.16);
+        if (t >= 1f)
+        {
+            digWobbleStart = null;
+            potatoVisual.localRotation = buriedLocalRotation;
+            return;
+        }
 
-        float distance = (-b - Mathf.Sqrt(discriminant)) / a;
-        return distance >= 0f && ray.GetPoint(distance).y >= BuriedWorldPosition.y;
+        float turn = 5f * (1f - t) * Mathf.Sin(t * Mathf.PI * 2f);
+        potatoVisual.localRotation = buriedLocalRotation * Quaternion.Euler(turn * 0.35f, 0f, turn);
     }
 
     private void RefreshDigDisplay()
@@ -516,6 +526,9 @@ public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPoin
         }
 #endif
         SuspendDigging();
+        if (digWobbleStart.HasValue && potatoVisual != null)
+            potatoVisual.localRotation = buriedLocalRotation;
+        digWobbleStart = null;
         if (harvestAnimationStart.HasValue)
         {
             harvestAnimationStart = null;
