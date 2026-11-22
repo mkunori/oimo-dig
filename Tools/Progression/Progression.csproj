@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../Assets/Scripts/DiggingEconomy.cs" Link="DiggingEconomy.cs" />
+    <Compile Include="../../Assets/Scripts/DiggingRebirth.cs" Link="DiggingRebirth.cs" />
+    <Compile Include="../../Assets/Scripts/FertilizerState.cs" Link="FertilizerState.cs" />
+    <Compile Include="../../Assets/Scripts/LargeNumber.cs" Link="LargeNumber.cs" />
+  </ItemGroup>
+</Project>

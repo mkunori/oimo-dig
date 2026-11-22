@@ -39,7 +39,8 @@ public static class DiggingEconomy
     public static readonly LargeNumber InitialTarget = LargeNumber.From(10);
 
     private const int AcceleratedLevelStart = 12;
-    private const double LevelAcceleration = 0.03;
+    private const double PriceAndLuckAcceleration = 0.03;
+    private const double DiggingEffectAcceleration = 0.0155;
     private const double EarlyTargetGrowth = 1.20;
     private const double PostPrestigeTargetGrowth = 1.18;
     private const double EarlyYieldExponent = 0.684;
@@ -51,18 +52,20 @@ public static class DiggingEconomy
     private static readonly double[] PriceGrowth = { 2.2, 3.0, 4.9, 5.3, 4.8 };
 
     public static LargeNumber Price(DigUpgrade upgrade, long level)
-        => LevelGrowth(PriceGrowth[(int)upgrade], level).Multiply(FirstPrices[(int)upgrade]).Ceiling();
+        => LevelGrowth(PriceGrowth[(int)upgrade], level, PriceAndLuckAcceleration)
+            .Multiply(FirstPrices[(int)upgrade]).Ceiling();
 
     public static LargeNumber Power(long level, double prestigeMultiplier)
-        => BoostAboveBase(LevelGrowth(2, level), prestigeMultiplier);
+        => BoostAboveBase(LevelGrowth(2, level, DiggingEffectAcceleration), prestigeMultiplier);
     public static LargeNumber AutoHitsPerSecond(long level, double prestigeMultiplier)
-        => level == 0 ? default : LevelGrowth(1.85, level - 1).Multiply(0.5 * prestigeMultiplier);
+        => level == 0 ? default :
+            LevelGrowth(1.85, level - 1, DiggingEffectAcceleration).Multiply(0.5 * prestigeMultiplier);
     public static double CriticalChance(long level, double prestigeMultiplier)
         => Rate(level * prestigeMultiplier, 0.05, 0.95);
     public static double CarryRate(long level, double prestigeMultiplier)
         => Rate(level * prestigeMultiplier, 0.25, 0.99);
     public static LargeNumber LuckMultiplier(long level, double prestigeMultiplier)
-        => BoostAboveBase(LevelGrowth(1.5, level).Ceiling(), prestigeMultiplier);
+        => BoostAboveBase(LevelGrowth(1.5, level, PriceAndLuckAcceleration).Ceiling(), prestigeMultiplier);
 
     internal static LargeNumber Reward(LargeNumber target, LargeNumber luckMultiplier, bool hasPrestige)
     {
@@ -77,10 +80,10 @@ public static class DiggingEconomy
     internal static LargeNumber NextTarget(LargeNumber target, bool hasPrestige)
         => target.Multiply(hasPrestige ? PostPrestigeTargetGrowth : EarlyTargetGrowth).Ceiling();
 
-    private static LargeNumber LevelGrowth(double growth, long level)
+    private static LargeNumber LevelGrowth(double growth, long level, double acceleration)
     {
         double acceleratedLevels = Math.Max(0, level - AcceleratedLevelStart);
-        double effectiveLevel = level + LevelAcceleration * acceleratedLevels * acceleratedLevels;
+        double effectiveLevel = level + acceleration * acceleratedLevels * acceleratedLevels;
         // Keep even externally edited levels within the save format's signed exponent range,
         // with room to combine the result with other growth factors.
         return LargeNumber.FromLog10(Math.Min(Math.Log10(growth) * effectiveLevel, long.MaxValue / 32d));
