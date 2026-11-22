@@ -3,6 +3,18 @@ using System.Collections.Generic;
 
 public enum DigUpgrade { Power, Auto, Critical, Carry, Luck }
 
+internal readonly struct DigUpgradeQuote
+{
+    public readonly long Count;
+    public readonly LargeNumber Cost;
+
+    public DigUpgradeQuote(long count, LargeNumber cost)
+    {
+        Count = count;
+        Cost = cost;
+    }
+}
+
 internal readonly struct DigBatch
 {
     public readonly LargeNumber Earned;
@@ -33,6 +45,7 @@ public static class DiggingEconomy
 {
     public const int UpgradeCount = 5;
     public const int HitsPerBatch = 96;
+    internal const long MaximumUpgradeLevel = long.MaxValue / 4;
     public const double AutoInterval = 0.1;
     public const double CriticalMultiplier = 5;
     public const double PostPrestigeBaseReward = 6;
@@ -40,6 +53,7 @@ public static class DiggingEconomy
 
     private const int AcceleratedLevelStart = 12;
     private const double PriceAndLuckAcceleration = 0.03;
+    private const int DominantPriceLevel = 1024;
     private const double DiggingEffectAcceleration = 0.0155;
     private const double EarlyTargetGrowth = 1.20;
     private const double PostPrestigeTargetGrowth = 1.18;
@@ -54,6 +68,70 @@ public static class DiggingEconomy
     public static LargeNumber Price(DigUpgrade upgrade, long level)
         => LevelGrowth(PriceGrowth[(int)upgrade], level, PriceAndLuckAcceleration)
             .Multiply(FirstPrices[(int)upgrade]).Ceiling();
+
+    internal static DigUpgradeQuote Quote(DigUpgrade upgrade, long level, LargeNumber wallet, bool maximum)
+    {
+        if (level >= MaximumUpgradeLevel)
+            return default;
+
+        var firstPrice = Price(upgrade, level);
+        if (firstPrice > wallet)
+            return default;
+        if (!maximum)
+            return new DigUpgradeQuote(1, firstPrice);
+
+        long end = level;
+        LargeNumber cost = default;
+        for (; end < DominantPriceLevel; end++)
+        {
+            var total = cost + Price(upgrade, end);
+            if (total > wallet)
+                return new DigUpgradeQuote(end - level, cost);
+            cost = total;
+        }
+
+        // Beyond this point even the slowest price curve grows by over 20 decimal
+        // orders per level until it flattens. LargeNumber discards the preceding
+        // subtotal at each such step, so the last rising price is the subtotal.
+        var flatPrice = Price(upgrade, MaximumUpgradeLevel - 1);
+        long risingEnd = FirstPriceAtLeast(upgrade, end, flatPrice, inclusive: true);
+        if (wallet < flatPrice)
+        {
+            long affordableEnd = FirstPriceAtLeast(upgrade, end, wallet, inclusive: false);
+            return affordableEnd == end ? new DigUpgradeQuote(end - level, cost)
+                : new DigUpgradeQuote(affordableEnd - level, Price(upgrade, affordableEnd - 1));
+        }
+
+        if (risingEnd > end)
+            cost = Price(upgrade, risingEnd - 1);
+
+        long low = 0;
+        long high = MaximumUpgradeLevel - risingEnd;
+        while (low < high)
+        {
+            long count = low + (high - low + 1) / 2;
+            if (cost + flatPrice.Multiply(count) <= wallet)
+                low = count;
+            else
+                high = count - 1;
+        }
+        return new DigUpgradeQuote(risingEnd - level + low, cost + flatPrice.Multiply(low));
+    }
+
+    private static long FirstPriceAtLeast(DigUpgrade upgrade, long level, LargeNumber limit, bool inclusive)
+    {
+        long high = MaximumUpgradeLevel;
+        while (level < high)
+        {
+            long mid = level + (high - level) / 2;
+            var price = Price(upgrade, mid);
+            if (inclusive ? price >= limit : price > limit)
+                high = mid;
+            else
+                level = mid + 1;
+        }
+        return level;
+    }
 
     public static LargeNumber Power(long level, double prestigeMultiplier)
         => BoostAboveBase(LevelGrowth(2, level, DiggingEffectAcceleration), prestigeMultiplier);
@@ -114,7 +192,10 @@ internal sealed class DiggingProgress
     public LargeNumber ManualPower => DiggingEconomy.Power(Level(DigUpgrade.Power), PrestigeMultiplier);
 
     public long Level(DigUpgrade upgrade) => Levels[(int)upgrade];
-    public bool CanBuy(DigUpgrade upgrade) => Wallet >= DiggingEconomy.Price(upgrade, Level(upgrade));
+    public bool CanBuy(DigUpgrade upgrade) => Quote(upgrade, false).Count > 0;
+
+    internal DigUpgradeQuote Quote(DigUpgrade upgrade, bool maximum)
+        => DiggingEconomy.Quote(upgrade, Level(upgrade), Wallet, maximum);
 
     public void QueueManualDig(LargeNumber amount) => PendingHits.AddLast(new PendingDig(amount));
 
@@ -124,11 +205,12 @@ internal sealed class DiggingProgress
             PendingHits.AddLast(new PendingDig(strikeSize * strikes, strikeSize));
     }
 
-    public bool Buy(DigUpgrade upgrade)
+    public bool Buy(DigUpgrade upgrade, bool maximum = false)
     {
-        if (!CanBuy(upgrade)) return false;
-        Wallet -= DiggingEconomy.Price(upgrade, Level(upgrade));
-        Levels[(int)upgrade]++;
+        var quote = Quote(upgrade, maximum);
+        if (quote.Count == 0) return false;
+        Wallet -= quote.Cost;
+        Levels[(int)upgrade] += quote.Count;
         return true;
     }
 

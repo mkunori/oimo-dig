@@ -64,7 +64,7 @@ internal static class DiggingSave
                 int expectedVersion = snapshotKey == saveKey ? 4 : snapshotKey == previousKey ? 3 : 2;
                 if (saved == null || saved.version != expectedVersion || saved.levels == null ||
                     saved.levels.Length != DiggingEconomy.UpgradeCount ||
-                    Array.Exists(saved.levels, level => level < 0 || level > long.MaxValue / 4) ||
+                    Array.Exists(saved.levels, level => level < 0 || level > DiggingEconomy.MaximumUpgradeLevel) ||
                     !LargeNumber.TryDecode(saved.wallet, out loaded.Wallet) ||
                     !LargeNumber.TryDecode(saved.earned, out loaded.Earned) ||
                     !LargeNumber.TryDecode(saved.harvestCount, out loaded.HarvestCount) ||

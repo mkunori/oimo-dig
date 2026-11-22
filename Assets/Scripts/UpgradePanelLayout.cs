@@ -14,6 +14,7 @@ public sealed class UpgradePanelLayout : MonoBehaviour
     private const float ViewportVerticalPadding = 16f;
 
     [SerializeField] private RectTransform content;
+    [SerializeField, Min(0)] private float headerHeight;
 
     private RectTransform panel;
 
@@ -46,7 +47,7 @@ public sealed class UpgradePanelLayout : MonoBehaviour
         // On narrower screens the fertilizer HUD sits below the panel.
         float margin = (available.x - width) / 2f < FertilizerSideSpace ? FertilizerVerticalMargin : VerticalMargin;
         float maxHeight = Mathf.Clamp(available.y - 2f * margin, 0f, MaximumHeight);
-        float height = Mathf.Min(content.rect.height + ViewportVerticalPadding, maxHeight);
+        float height = Mathf.Min(content.rect.height + ViewportVerticalPadding + headerHeight, maxHeight);
         if (!Mathf.Approximately(panel.rect.height, height))
             panel.SetSizeWithCurrentAnchors(RectTransform.Axis.Vertical, height);
     }

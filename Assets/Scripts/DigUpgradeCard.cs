@@ -18,14 +18,19 @@ public sealed class DigUpgradeCard : MonoBehaviour
         purchase.onClick.AddListener(() => digging.BuyUpgrade(upgrade));
     }
 
-    public void Refresh(long level, bool affordable, double prestigeMultiplier, LargeNumber manualPower,
+    internal void Refresh(long level, DigUpgradeQuote quote, double prestigeMultiplier, LargeNumber manualPower,
         double autoSpeedMultiplier)
     {
+        bool affordable = quote.Count > 0;
+        long purchasedLevel = level + quote.Count;
+        long previewLevel = affordable ? purchasedLevel : System.Math.Min(level + 1, DiggingEconomy.MaximumUpgradeLevel);
         title.text = $"{Names[(int)upgrade]}  Lv.{level}";
         string effect = upgrade == DigUpgrade.Auto
-            ? AutoEffect(level, prestigeMultiplier, manualPower, autoSpeedMultiplier)
-            : $"{Effect(level, prestigeMultiplier)} → {Effect(level + 1, prestigeMultiplier)}";
-        details.text = $"{effect}\n価格  芋 {DiggingEconomy.Price(upgrade, level).Format()}個";
+            ? AutoEffect(level, previewLevel, prestigeMultiplier, manualPower, autoSpeedMultiplier)
+            : $"{Effect(level, prestigeMultiplier)} → {Effect(previewLevel, prestigeMultiplier)}";
+        string price = affordable ? $"価格  芋 {quote.Cost.Format()}個"
+            : $"必要  芋 {DiggingEconomy.Price(upgrade, level).Format()}個";
+        details.text = $"+{quote.Count} → Lv.{purchasedLevel}\n{price}\n{effect}";
         purchase.interactable = affordable;
         purchaseLabel.text = affordable ? "購入" : "芋が不足";
     }
@@ -41,10 +46,11 @@ public sealed class DigUpgradeCard : MonoBehaviour
         }
     }
 
-    private static string AutoEffect(long level, double prestigeMultiplier, LargeNumber power, double speedMultiplier)
+    private static string AutoEffect(long level, long previewLevel, double prestigeMultiplier, LargeNumber power,
+        double speedMultiplier)
     {
         var speed = DiggingEconomy.AutoHitsPerSecond(level, prestigeMultiplier).Multiply(speedMultiplier);
-        var nextSpeed = DiggingEconomy.AutoHitsPerSecond(level + 1, prestigeMultiplier).Multiply(speedMultiplier);
+        var nextSpeed = DiggingEconomy.AutoHitsPerSecond(previewLevel, prestigeMultiplier).Multiply(speedMultiplier);
         return $"自動掘り速度  {speed.FormatRate()} → {nextSpeed.FormatRate()}回/秒\n" +
             $"自動掘削量(通常)  {(power * speed).FormatRate()} → {(power * nextSpeed).FormatRate()}/秒";
     }

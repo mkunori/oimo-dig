@@ -14,6 +14,7 @@ public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPoin
     private const double AutosaveInterval = 3.0;
     private const double ClockCheckpointInterval = 15.0;
     private const double UpgradeHintRefreshInterval = 1.0;
+    private const double UpgradeCardsRefreshInterval = 0.25;
     private const double HarvestAnimationDuration = 0.18;
     private const float FullDigLift = 0.53f;
     private const float HarvestJumpHeight = 0.45f;
@@ -26,6 +27,8 @@ public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPoin
     [SerializeField] private GameObject upgradePanel;
     [SerializeField] private Image upgradeBackdrop;
     [SerializeField] private Graphic upgradeToggleGraphic;
+    [SerializeField] private Button singleUpgradeButton;
+    [SerializeField] private Button maximumUpgradeButton;
     [SerializeField] private TMP_Text upgradeHint;
     [SerializeField, Min(1)] private float stalledHarvestSeconds = 30;
     [SerializeField] private GameObject firstShovelUpgradeBadge;
@@ -51,6 +54,9 @@ public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPoin
     private bool foreground;
     private bool rapidHarvests;
     private double nextUpgradeHintRefresh;
+    private double nextUpgradeCardsRefresh;
+    private bool upgradeCardsDirty;
+    private bool buyMaximum;
 
     private InputDevice heldDevice;
     private int heldPointerId;
@@ -118,6 +124,12 @@ public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPoin
         fertilizerView.Connect(this);
         foreach (var card in upgradeCards)
             card.Connect(this);
+        if (singleUpgradeButton != null && maximumUpgradeButton != null)
+        {
+            singleUpgradeButton.onClick.AddListener(() => SetUpgradePurchaseMode(false));
+            maximumUpgradeButton.onClick.AddListener(() => SetUpgradePurchaseMode(true));
+            SetUpgradePurchaseMode(false);
+        }
         digProgressSlider.wholeNumbers = false;
         digProgressSlider.maxValue = 1f;
         displayedProgress = state.Progress.FractionOf(state.Target);
@@ -226,6 +238,8 @@ public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPoin
         if (open)
             RefreshUpgradeHint(Time.unscaledTimeAsDouble);
         upgradePanel.SetActive(open);
+        if (open)
+            RefreshUpgradeCards();
         RefreshMenuInput();
         RefreshUpgradeBadge();
     }
@@ -247,13 +261,27 @@ public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPoin
 
     public void BuyUpgrade(DigUpgrade upgrade)
     {
-        if (!isActiveAndEnabled || IsModalOpen || !state.Buy(upgrade))
+        if (!isActiveAndEnabled || IsModalOpen)
             return;
+        if (!state.Buy(upgrade, buyMaximum))
+        {
+            RefreshUpgradeCards();
+            return;
+        }
 
         RefreshInventoryDisplay();
+        RefreshUpgradeCards();
         if (upgradePanel.activeSelf)
             RefreshUpgradeHint(Time.unscaledTimeAsDouble);
         RequestSave(Time.unscaledTimeAsDouble, immediately: true);
+    }
+
+    private void SetUpgradePurchaseMode(bool maximum)
+    {
+        buyMaximum = maximum;
+        singleUpgradeButton.interactable = maximum;
+        maximumUpgradeButton.interactable = !maximum;
+        RefreshUpgradeCards();
     }
 
     internal void OpenRebirth(RebirthKind kind)
@@ -380,6 +408,8 @@ public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPoin
 
         if (upgradePanel.activeSelf && now >= nextUpgradeHintRefresh)
             RefreshUpgradeHint(now);
+        if (upgradeCardsDirty && now >= nextUpgradeCardsRefresh)
+            RefreshUpgradeCards();
     }
 
     private bool IsHeldPointerPressed()
@@ -549,16 +579,21 @@ public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPoin
     {
         ownedPotatoesText.text = $"所持芋  {state.Wallet.Format()}";
         firstDigHint.SetActive(state.HarvestCount.IsZero);
-        RefreshUpgradeCards();
+        upgradeCardsDirty = upgradePanel.activeSelf;
         rebirthView.Refresh(state);
         RefreshUpgradeBadge();
     }
 
     private void RefreshUpgradeCards()
     {
+        upgradeCardsDirty = false;
+        if (!upgradePanel.activeSelf)
+            return;
+
+        nextUpgradeCardsRefresh = Time.unscaledTimeAsDouble + UpgradeCardsRefreshInterval;
         var power = state.ManualPower;
         foreach (var card in upgradeCards)
-            card.Refresh(state.Level(card.Upgrade), state.CanBuy(card.Upgrade), state.PrestigeMultiplier,
+            card.Refresh(state.Level(card.Upgrade), state.Quote(card.Upgrade, buyMaximum), state.PrestigeMultiplier,
                 power, AutoSpeedMultiplier);
     }
 
