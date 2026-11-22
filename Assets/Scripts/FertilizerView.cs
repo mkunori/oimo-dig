@@ -16,18 +16,16 @@ public sealed class FertilizerView : MonoBehaviour
     [SerializeField] private Button boostButton;
     [SerializeField] private Button capacityButton;
     [SerializeField] private Button rateButton;
-    [SerializeField] private Button closeButton;
 
     private int shownSeconds = -1;
     internal bool IsOpen => panel.activeSelf;
 
     internal void Connect(DiggingPrototype digging)
     {
-        openButton.onClick.AddListener(digging.OpenFertilizer);
+        openButton.onClick.AddListener(digging.ToggleFertilizer);
         boostButton.onClick.AddListener(digging.BuyFertilizerBoost);
         capacityButton.onClick.AddListener(digging.BuyFertilizerCapacity);
         rateButton.onClick.AddListener(digging.BuyFertilizerRate);
-        closeButton.onClick.AddListener(Close);
         Close();
     }
 
@@ -35,10 +33,11 @@ public sealed class FertilizerView : MonoBehaviour
     {
         panel.SetActive(true);
         Refresh(state);
-        closeButton.Select();
     }
 
     internal void Close() => panel.SetActive(false);
+
+    internal void SetToggleRaycast(bool enabled) => openButton.targetGraphic.raycastTarget = enabled;
 
     internal void Refresh(FertilizerState state)
     {
@@ -57,7 +56,10 @@ public sealed class FertilizerView : MonoBehaviour
         int seconds = (int)Math.Ceiling(state.BoostRemaining);
         if (seconds == shownSeconds) return;
         shownSeconds = seconds;
-        timerLabel.text = seconds > 0 ? $"10倍速  {seconds}秒" : "肥料を使う";
+        string speed = $"{FertilizerState.BoostSpeed:0}倍速";
+        timerLabel.text = seconds > 0 ? $"{speed}  {seconds}秒"
+            : state.Balance >= FertilizerState.BoostPrice ? $"{speed}  購入"
+            : $"{speed}  不足{(FertilizerState.BoostPrice - state.Balance).Ceiling().Format()}";
         boostDetails.text = $"掘削速度  ×{FertilizerState.BoostSpeed:0} / {FertilizerState.BoostDuration:0}秒\n"
             + (seconds > 0 ? $"効果中  {seconds}秒" : $"価格  肥料 {FertilizerState.BoostPrice.Format()}");
         boostButton.interactable = seconds == 0 && state.Balance >= FertilizerState.BoostPrice;

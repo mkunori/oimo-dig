@@ -13,6 +13,7 @@ public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPoin
     private const int IndividuallyRolledAutoStrikes = 64;
     private const double AutosaveInterval = 3.0;
     private const double ClockCheckpointInterval = 15.0;
+    private const double UpgradeHintRefreshInterval = 1.0;
     private const double HarvestAnimationDuration = 0.18;
     private const float FullDigLift = 0.53f;
     private const float HarvestJumpHeight = 0.45f;
@@ -23,7 +24,12 @@ public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPoin
     [SerializeField] private DiggingFeedback diggingFeedback;
     [SerializeField] private GameObject firstDigHint;
     [SerializeField] private GameObject upgradePanel;
+    [SerializeField] private Image upgradeBackdrop;
+    [SerializeField] private Graphic upgradeToggleGraphic;
+    [SerializeField] private TMP_Text upgradeHint;
+    [SerializeField, Min(1)] private float stalledHarvestSeconds = 30;
     [SerializeField] private GameObject firstShovelUpgradeBadge;
+    [SerializeField] private TMP_Text upgradeBadgeLabel;
     [SerializeField] private DigUpgradeCard[] upgradeCards;
     [SerializeField] private RebirthView rebirthView;
     [SerializeField] private FertilizerView fertilizerView;
@@ -44,6 +50,7 @@ public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPoin
     private double nextClockCheckpoint;
     private bool foreground;
     private bool rapidHarvests;
+    private double nextUpgradeHintRefresh;
 
     private InputDevice heldDevice;
     private int heldPointerId;
@@ -66,7 +73,7 @@ public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPoin
     private void Awake()
     {
         if (digProgressSlider == null || ownedPotatoesText == null || firstDigHint == null || upgradePanel == null ||
-            firstShovelUpgradeBadge == null || rebirthView == null || fertilizerView == null || upgradeCards == null ||
+            firstShovelUpgradeBadge == null || upgradeBadgeLabel == null || rebirthView == null || fertilizerView == null || upgradeCards == null ||
             upgradeCards.Length != DiggingEconomy.UpgradeCount || Array.Exists(upgradeCards, card => card == null))
         {
             Debug.LogError("Assign the digging HUD, onboarding and upgrade UI references on DiggingPrototype.", this);
@@ -90,6 +97,23 @@ public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPoin
             Debug.LogWarning("OIMO-DIG could not load this save. Existing data will be preserved.", this);
 
         upgradePanel.SetActive(false);
+        if (upgradeBackdrop != null)
+        {
+            upgradeBackdrop.raycastTarget = false;
+            upgradeBackdrop.gameObject.SetActive(false);
+            var outsidePress = new EventTrigger.Entry { eventID = EventTriggerType.PointerDown };
+            outsidePress.callback.AddListener(data =>
+            {
+                if (data is PointerEventData pointer && pointer.button == PointerEventData.InputButton.Left)
+                {
+                    if (fertilizerView.IsOpen)
+                        CloseFertilizer();
+                    else
+                        SetUpgradePanelOpen(false);
+                }
+            });
+            upgradeBackdrop.gameObject.AddComponent<EventTrigger>().triggers.Add(outsidePress);
+        }
         rebirthView.Connect(this);
         fertilizerView.Connect(this);
         foreach (var card in upgradeCards)
@@ -130,12 +154,24 @@ public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPoin
 
     private bool IsModalOpen => rebirthView.IsOpen || fertilizerView.IsOpen;
 
-    internal void OpenFertilizer()
+    internal void ToggleFertilizer()
     {
-        if (!isActiveAndEnabled || IsModalOpen)
+        if (!isActiveAndEnabled || rebirthView.IsOpen || upgradePanel.activeSelf)
             return;
+        if (fertilizerView.IsOpen)
+        {
+            CloseFertilizer();
+            return;
+        }
         SuspendDigging();
         fertilizerView.Open(state.Fertilizer);
+        RefreshMenuInput();
+    }
+
+    private void CloseFertilizer()
+    {
+        fertilizerView.Close();
+        RefreshMenuInput();
     }
 
     internal void BuyFertilizerBoost()
@@ -147,7 +183,7 @@ public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPoin
         if (fertilizer.IsBoosted || fertilizer.Balance < FertilizerState.BoostPrice) return;
         fertilizer.BuyBoost();
         UpdateManualInterval();
-        fertilizerView.Close();
+        CloseFertilizer();
         CommitFertilizerUpdate();
         RefreshUpgradeCards();
     }
@@ -181,8 +217,32 @@ public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPoin
         if (!isActiveAndEnabled || IsModalOpen)
             return;
 
-        upgradePanel.SetActive(!upgradePanel.activeSelf);
-        RefreshFirstShovelUpgradeBadge();
+        SetUpgradePanelOpen(!upgradePanel.activeSelf);
+    }
+
+    private void SetUpgradePanelOpen(bool open)
+    {
+        ReleaseHold();
+        if (open)
+            RefreshUpgradeHint(Time.unscaledTimeAsDouble);
+        upgradePanel.SetActive(open);
+        RefreshMenuInput();
+        RefreshUpgradeBadge();
+    }
+
+    private void RefreshMenuInput()
+    {
+        bool upgradeOpen = upgradePanel.activeSelf;
+        bool fertilizerOpen = fertilizerView.IsOpen;
+        bool menuOpen = upgradeOpen || fertilizerOpen;
+        if (upgradeBackdrop != null)
+        {
+            upgradeBackdrop.raycastTarget = menuOpen;
+            upgradeBackdrop.gameObject.SetActive(menuOpen);
+        }
+        if (upgradeToggleGraphic != null)
+            upgradeToggleGraphic.raycastTarget = !fertilizerOpen;
+        fertilizerView.SetToggleRaycast(!upgradeOpen);
     }
 
     public void BuyUpgrade(DigUpgrade upgrade)
@@ -191,6 +251,8 @@ public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPoin
             return;
 
         RefreshInventoryDisplay();
+        if (upgradePanel.activeSelf)
+            RefreshUpgradeHint(Time.unscaledTimeAsDouble);
         RequestSave(Time.unscaledTimeAsDouble, immediately: true);
     }
 
@@ -219,13 +281,13 @@ public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPoin
         SetVisualLift(0);
         RequestSave(Time.unscaledTimeAsDouble, immediately: true);
         rebirthView.Close();
-        upgradePanel.SetActive(false);
+        SetUpgradePanelOpen(false);
         RefreshInventoryDisplay();
     }
 
     public void OnPointerDown(PointerEventData eventData)
     {
-        if (!isActiveAndEnabled || IsModalOpen || !Application.isFocused || !foreground || heldDevice != null ||
+        if (!isActiveAndEnabled || IsModalOpen || upgradePanel.activeSelf || !Application.isFocused || !foreground || heldDevice != null ||
             eventData.button != PointerEventData.InputButton.Left ||
             !(eventData is ExtendedPointerEventData pointer))
         {
@@ -315,6 +377,9 @@ public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPoin
 
         if (state.PendingHits.Count > 0 || !state.Carry.IsZero)
             ApplyDig(now);
+
+        if (upgradePanel.activeSelf && now >= nextUpgradeHintRefresh)
+            RefreshUpgradeHint(now);
     }
 
     private bool IsHeldPointerPressed()
@@ -486,7 +551,7 @@ public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPoin
         firstDigHint.SetActive(state.HarvestCount.IsZero);
         RefreshUpgradeCards();
         rebirthView.Refresh(state);
-        RefreshFirstShovelUpgradeBadge();
+        RefreshUpgradeBadge();
     }
 
     private void RefreshUpgradeCards()
@@ -497,10 +562,25 @@ public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPoin
                 power, AutoSpeedMultiplier);
     }
 
-    private void RefreshFirstShovelUpgradeBadge()
+    private void RefreshUpgradeBadge()
     {
-        firstShovelUpgradeBadge.SetActive(state.Level(DigUpgrade.Power) == 0 &&
-            state.CanBuy(DigUpgrade.Power) && !upgradePanel.activeSelf);
+        bool power = state.Level(DigUpgrade.Power) == 0 && state.CanBuy(DigUpgrade.Power);
+        bool auto = state.Level(DigUpgrade.Auto) == 0 && state.CanBuy(DigUpgrade.Auto);
+        firstShovelUpgradeBadge.SetActive(!upgradePanel.activeSelf && (power || auto));
+        if (firstShovelUpgradeBadge.activeSelf)
+            upgradeBadgeLabel.text = power ? "掘力を強化" : "自動掘を購入";
+    }
+
+    private void RefreshUpgradeHint(double now)
+    {
+        nextUpgradeHintRefresh = now + UpgradeHintRefreshInterval;
+        if (upgradeHint == null)
+            return;
+
+        string hint = DigUpgradeHint.Describe(state, stalledHarvestSeconds, 1 / DigInterval);
+        if (upgradeHint.text != hint)
+            upgradeHint.text = hint;
+        upgradeHint.gameObject.SetActive(hint.Length > 0);
     }
 
     private void RequestSave(double now, bool immediately)

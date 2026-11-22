@@ -9,6 +9,7 @@ public sealed class RebirthView : MonoBehaviour
     [SerializeField] private Slider goalGauge;
     [SerializeField] private RectTransform cycleBestMarker;
     [SerializeField] private Button prestigeButton;
+    [SerializeField] private TMP_Text prestigeLabel;
     [SerializeField] private Button imofinityButton;
     [SerializeField] private GameObject confirmation;
     [SerializeField] private TMP_Text confirmationTitle;
@@ -41,6 +42,11 @@ public sealed class RebirthView : MonoBehaviour
         cycleBestMarker.anchorMax = new Vector2(best, 1);
         cycleBestMarker.gameObject.SetActive(!state.CycleBest.IsZero);
         prestigeButton.interactable = DiggingRebirth.CanUse(RebirthKind.Prestige, state);
+        string prestigeStatus = prestigeButton.interactable
+            ? FormatMultiplier(state.PrestigeMultiplier) + " → " +
+                FormatMultiplier(DiggingRebirth.Multiplier(DiggingRebirth.NextPrestigeExponent(state)))
+            : $"必要  1e{DiggingRebirth.PrestigeGoalExponent}";
+        prestigeLabel.text = $"IMOPRESTAGE\n<size=85%>{prestigeStatus}</size>";
         imofinityButton.gameObject.SetActive(imofinityReady);
     }
 
