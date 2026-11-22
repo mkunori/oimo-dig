@@ -5,9 +5,13 @@ using UnityEngine.UI;
 [RequireComponent(typeof(RectTransform))]
 public sealed class UpgradePanelLayout : MonoBehaviour
 {
-    private const float MinimumPreferredWidth = 184f;
-    private const float MaximumWidth = 336f;
-    private const float TopMargin = 24f;
+    private const float MaximumWidth = 414f;
+    private const float MaximumHeight = 620f;
+    private const float SideMargin = 16f;
+    private const float VerticalMargin = 94f;
+    private const float FertilizerSideSpace = 224f;
+    private const float FertilizerVerticalMargin = 157f;
+    private const float ViewportVerticalPadding = 16f;
 
     [SerializeField] private RectTransform content;
 
@@ -30,9 +34,7 @@ public sealed class UpgradePanelLayout : MonoBehaviour
             return;
 
         Vector2 available = canvas.rect.size;
-        float gutter = Mathf.Abs(panel.anchoredPosition.x);
-        float desiredWidth = Mathf.Clamp(available.x * 0.44f, MinimumPreferredWidth, MaximumWidth);
-        float width = Mathf.Min(desiredWidth, Mathf.Max(0f, available.x - 2f * gutter));
+        float width = Mathf.Min(MaximumWidth, Mathf.Max(0f, available.x - 2f * SideMargin));
         if (!Mathf.Approximately(panel.rect.width, width))
         {
             panel.SetSizeWithCurrentAnchors(RectTransform.Axis.Horizontal, width);
@@ -41,9 +43,10 @@ public sealed class UpgradePanelLayout : MonoBehaviour
         if (rebuildContent)
             LayoutRebuilder.ForceRebuildLayoutImmediate(content);
 
-        // The content keeps its preferred height so a short viewport can scroll.
-        float maxHeight = Mathf.Max(0f, available.y - panel.anchoredPosition.y - TopMargin);
-        float height = Mathf.Min(content.rect.height, maxHeight);
+        // On narrower screens the fertilizer HUD sits below the panel.
+        float margin = (available.x - width) / 2f < FertilizerSideSpace ? FertilizerVerticalMargin : VerticalMargin;
+        float maxHeight = Mathf.Clamp(available.y - 2f * margin, 0f, MaximumHeight);
+        float height = Mathf.Min(content.rect.height + ViewportVerticalPadding, maxHeight);
         if (!Mathf.Approximately(panel.rect.height, height))
             panel.SetSizeWithCurrentAnchors(RectTransform.Axis.Vertical, height);
     }

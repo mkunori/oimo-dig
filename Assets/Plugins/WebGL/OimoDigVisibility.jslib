@@ -1,37 +1,38 @@
 mergeInto(LibraryManager.library, {
-    $OimoDigVisibilityState: { revision: 0, saveOnHide: null, saveOnPageHide: null },
+    $OimoDigVisibilityState: { suspended: false, onVisibility: null, onPageHide: null, onPageShow: null },
 
     OimoDigGetPageVisibility__deps: ["$OimoDigVisibilityState"],
     OimoDigGetPageVisibility: function () {
-        if (OimoDigVisibilityState.revision === 0) {
-            OimoDigVisibilityState.revision = 1;
-            document.addEventListener("visibilitychange", function () {
-                ++OimoDigVisibilityState.revision;
-            });
-        }
-
-        // The revision also detects a hide/show cycle that happened between frames.
-        var revision = OimoDigVisibilityState.revision;
-        return document.hidden ? -revision : revision;
+        return document.hidden || OimoDigVisibilityState.suspended ? 0 : 1;
     },
 
-    OimoDigSetPageSaveCallback__deps: ["$OimoDigVisibilityState"],
-    OimoDigSetPageSaveCallback: function (callback) {
+    OimoDigSetPageVisibilityCallback__deps: ["$OimoDigVisibilityState"],
+    OimoDigSetPageVisibilityCallback: function (callback) {
         var state = OimoDigVisibilityState;
-        if (state.saveOnHide) {
-            document.removeEventListener("visibilitychange", state.saveOnHide);
-            window.removeEventListener("pagehide", state.saveOnPageHide);
-            state.saveOnHide = state.saveOnPageHide = null;
+        if (state.onVisibility) {
+            document.removeEventListener("visibilitychange", state.onVisibility);
+            window.removeEventListener("pagehide", state.onPageHide);
+            window.removeEventListener("pageshow", state.onPageShow);
+            state.onVisibility = state.onPageHide = state.onPageShow = null;
         }
         if (!callback) return;
 
-        state.saveOnPageHide = function () {
-            {{{ makeDynCall('v', 'callback') }}}();
+        var notify = function (visible) {
+            {{{ makeDynCall('vi', 'callback') }}}(visible);
         };
-        state.saveOnHide = function () {
-            if (document.hidden) state.saveOnPageHide();
+        state.onVisibility = function () {
+            notify(document.hidden || state.suspended ? 0 : 1);
         };
-        document.addEventListener("visibilitychange", state.saveOnHide);
-        window.addEventListener("pagehide", state.saveOnPageHide);
+        state.onPageHide = function () {
+            state.suspended = true;
+            notify(0);
+        };
+        state.onPageShow = function () {
+            state.suspended = false;
+            state.onVisibility();
+        };
+        document.addEventListener("visibilitychange", state.onVisibility);
+        window.addEventListener("pagehide", state.onPageHide);
+        window.addEventListener("pageshow", state.onPageShow);
     }
 });

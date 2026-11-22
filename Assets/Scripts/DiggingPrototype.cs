@@ -9,61 +9,29 @@ using UnityEngine.UI;
 
 public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPointerUpHandler
 {
-    private const int InitialRequiredDigAmount = 10;
-    private const int AutoDigUnlockHarvests = 5;
-    private const int AutoDigPrice = 2;
     private const double DigInterval = 0.25;
-    private const double AutoDigInterval = 1.0;
     private const double AutosaveInterval = 3.0;
+    private const double ClockCheckpointInterval = 15.0;
     private const double HarvestAnimationDuration = 0.18;
     private const float FullDigLift = 0.53f;
     private const float HarvestJumpHeight = 0.45f;
-    private const string SaveKey = "OimoDig.PrototypeSave";
-    private const int SaveVersion = 1;
-
-    [Serializable]
-    private sealed class SaveData
-    {
-        public int version;
-        public int ownedPotatoes = -1;
-        public int harvestedCount = -1;
-        public int shovelLevel = -1;
-        // A numeric flag lets the loader distinguish "not purchased" from a missing field.
-        public int autoDigPurchased = -1;
-        public int digProgress = -1;
-        public int requiredDigAmount = -1;
-    }
-
-    private static readonly (int Price, int Power)[] ShovelUpgrades =
-    {
-        (3, 2),
-        (5, 4),
-        (8, 8)
-    };
 
     [SerializeField] private Slider digProgressSlider;
-    [SerializeField] private TMP_Text digAmountText;
-    [SerializeField] private TMP_Text harvestCountText;
     [SerializeField] private TMP_Text ownedPotatoesText;
     [SerializeField] private Transform potatoVisual;
     [SerializeField] private DiggingFeedback diggingFeedback;
     [SerializeField] private GameObject firstDigHint;
     [SerializeField] private GameObject upgradePanel;
     [SerializeField] private GameObject firstShovelUpgradeBadge;
-    [SerializeField] private TMP_Text shovelDetailsText;
-    [SerializeField] private Button buyShovelButton;
-    [SerializeField] private TMP_Text buyShovelButtonText;
-    [SerializeField] private GameObject autoDigSection;
-    [SerializeField] private Button buyAutoDigButton;
-    [SerializeField] private TMP_Text buyAutoDigButtonText;
+    [SerializeField] private DigUpgradeCard[] upgradeCards;
+    [SerializeField] private RebirthView rebirthView;
+    [SerializeField] private FertilizerView fertilizerView;
 
-    private int digProgress;
-    private int requiredDigAmount = InitialRequiredDigAmount;
-    private int shovelLevel;
-    private int harvestedCount;
-    private int ownedPotatoes;
-    private bool autoDigPurchased;
+    private DiggingProgress state;
+    private bool canSave;
+    private float displayedProgress;
     private double nextDigTime;
+    private double lastDigTime = double.NegativeInfinity;
     private double? nextAutoDigTime;
     private Vector3 buriedLocalPosition;
     private Quaternion buriedLocalRotation;
@@ -71,6 +39,10 @@ public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPoin
     private double? harvestAnimationStart;
     private bool saveDirty;
     private double nextAutosaveTime;
+    private double lastFertilizerTick;
+    private double nextClockCheckpoint;
+    private bool foreground;
+    private bool rapidHarvests;
 
     private InputDevice heldDevice;
     private int heldPointerId;
@@ -79,30 +51,22 @@ public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPoin
     private double heldTouchStartTime;
 
 #if UNITY_WEBGL && !UNITY_EDITOR
+    private delegate void BrowserVisibilityHandler(int visible);
     [System.Runtime.InteropServices.DllImport("__Internal")]
     private static extern int OimoDigGetPageVisibility();
     [System.Runtime.InteropServices.DllImport("__Internal")]
-    private static extern void OimoDigSetPageSaveCallback(Action callback);
-    private static readonly Action WebSaveCallback = SaveFromBrowser;
+    private static extern void OimoDigSetPageVisibilityCallback(BrowserVisibilityHandler callback);
+    private static readonly BrowserVisibilityHandler WebVisibilityCallback = HandleBrowserVisibility;
     private static DiggingPrototype webSaveOwner;
-    private int pageVisibility;
 #else
     private bool applicationPaused;
 #endif
 
-    private int DigPower => shovelLevel == 0 ? 1 : ShovelUpgrades[shovelLevel - 1].Power;
-    private bool ShovelAtMaxLevel => shovelLevel == ShovelUpgrades.Length;
-    private bool CanBuyShovel => !ShovelAtMaxLevel && ownedPotatoes >= ShovelUpgrades[shovelLevel].Price;
-    private bool AutoDigUnlocked => harvestedCount >= AutoDigUnlockHarvests;
-    private bool CanBuyAutoDig => AutoDigUnlocked && !autoDigPurchased && ownedPotatoes >= AutoDigPrice;
-
     private void Awake()
     {
-        if (digProgressSlider == null || digAmountText == null || harvestCountText == null ||
-            ownedPotatoesText == null || firstDigHint == null || upgradePanel == null ||
-            firstShovelUpgradeBadge == null || shovelDetailsText == null ||
-            buyShovelButton == null || buyShovelButtonText == null || autoDigSection == null ||
-            buyAutoDigButton == null || buyAutoDigButtonText == null)
+        if (digProgressSlider == null || ownedPotatoesText == null || firstDigHint == null || upgradePanel == null ||
+            firstShovelUpgradeBadge == null || rebirthView == null || fertilizerView == null || upgradeCards == null ||
+            upgradeCards.Length != DiggingEconomy.UpgradeCount || Array.Exists(upgradeCards, card => card == null))
         {
             Debug.LogError("Assign the digging HUD, onboarding and upgrade UI references on DiggingPrototype.", this);
             enabled = false;
@@ -115,63 +79,151 @@ public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPoin
             buriedLocalRotation = potatoVisual.localRotation;
         }
 
-        LoadSave();
+#if UNITY_EDITOR
+        if (RebirthVerification.TryTakeFixture(out state))
+            canSave = true;
+        else
+#endif
+            canSave = DiggingSave.TryLoad(out state);
+        if (!canSave)
+            Debug.LogWarning("OIMO-DIG could not load this save. Existing data will be preserved.", this);
+
         upgradePanel.SetActive(false);
-        RefreshDigDisplay();
+        rebirthView.Connect(this);
+        fertilizerView.Connect(this);
+        foreach (var card in upgradeCards)
+            card.Connect(this);
+        digProgressSlider.wholeNumbers = false;
+        digProgressSlider.maxValue = 1f;
+        displayedProgress = state.Progress.FractionOf(state.Target);
+        digProgressSlider.SetValueWithoutNotify(displayedProgress);
         RefreshInventoryDisplay();
         SetVisualLift(DigLift);
+        lastFertilizerTick = Time.realtimeSinceStartupAsDouble;
+        foreground = IsForeground();
+        if (foreground)
+            state.Fertilizer.AccrueAwayTime(DateTime.UtcNow.Ticks);
+        else if (state.Fertilizer.CheckpointUtcTicks == 0)
+            state.Fertilizer.Checkpoint(DateTime.UtcNow.Ticks);
+        fertilizerView.Refresh(state.Fertilizer);
+        RequestSave(Time.unscaledTimeAsDouble, immediately: true);
+    }
+
+    private void OnEnable()
+    {
+        SetForeground(IsForeground());
+#if UNITY_WEBGL && !UNITY_EDITOR
+        webSaveOwner = this;
+        OimoDigSetPageVisibilityCallback(WebVisibilityCallback);
+#endif
     }
 
 #if UNITY_WEBGL && !UNITY_EDITOR
-    private void OnEnable()
-    {
-        webSaveOwner = this;
-        OimoDigSetPageSaveCallback(WebSaveCallback);
-    }
-
-    [AOT.MonoPInvokeCallback(typeof(Action))]
-    private static void SaveFromBrowser()
+    [AOT.MonoPInvokeCallback(typeof(BrowserVisibilityHandler))]
+    private static void HandleBrowserVisibility(int visible)
     {
         if (webSaveOwner != null)
-            webSaveOwner.SaveIfDirty();
+            webSaveOwner.SetForeground(visible != 0);
     }
 #endif
 
+    private bool IsModalOpen => rebirthView.IsOpen || fertilizerView.IsOpen;
+
+    internal void OpenFertilizer()
+    {
+        if (!isActiveAndEnabled || IsModalOpen)
+            return;
+        SuspendDigging();
+        fertilizerView.Open(state.Fertilizer);
+    }
+
+    internal void BuyFertilizerBoost()
+    {
+        if (!CanUseFertilizerPanel())
+            return;
+        AdvanceFertilizerClock();
+        var fertilizer = state.Fertilizer;
+        if (fertilizer.IsBoosted || fertilizer.Balance < FertilizerState.BoostPrice) return;
+        fertilizer.BuyBoost();
+        UpdateManualInterval();
+        fertilizerView.Close();
+        CommitFertilizerUpdate();
+    }
+
+    internal void BuyFertilizerCapacity()
+    {
+        if (!CanUseFertilizerPanel() || state.Fertilizer.Balance < state.Fertilizer.CapacityPrice)
+            return;
+        state.Fertilizer.BuyCapacity();
+        CommitFertilizerUpdate();
+    }
+
+    internal void BuyFertilizerRate()
+    {
+        if (!CanUseFertilizerPanel() || state.Fertilizer.Balance < state.Fertilizer.RatePrice)
+            return;
+        state.Fertilizer.BuyRate();
+        CommitFertilizerUpdate();
+    }
+
+    private bool CanUseFertilizerPanel() => isActiveAndEnabled && foreground && fertilizerView.IsOpen;
+
+    private void CommitFertilizerUpdate()
+    {
+        RequestSave(Time.unscaledTimeAsDouble, immediately: true);
+        fertilizerView.Refresh(state.Fertilizer);
+    }
+
     public void ToggleUpgradePanel()
     {
-        if (!isActiveAndEnabled)
+        if (!isActiveAndEnabled || IsModalOpen)
             return;
 
         upgradePanel.SetActive(!upgradePanel.activeSelf);
         RefreshFirstShovelUpgradeBadge();
     }
 
-    public void BuyShovelUpgrade()
+    public void BuyUpgrade(DigUpgrade upgrade)
     {
-        if (!isActiveAndEnabled || !CanBuyShovel)
+        if (!isActiveAndEnabled || IsModalOpen || !state.Buy(upgrade))
             return;
 
-        ownedPotatoes -= ShovelUpgrades[shovelLevel].Price;
-        shovelLevel++;
         RefreshInventoryDisplay();
         RequestSave(Time.unscaledTimeAsDouble, immediately: true);
     }
 
-    public void BuyAutoDig()
+    internal void OpenRebirth(RebirthKind kind)
     {
-        if (!isActiveAndEnabled || !CanBuyAutoDig)
+        if (!isActiveAndEnabled || IsModalOpen || !DiggingRebirth.CanUse(kind, state))
+            return;
+        SuspendDigging();
+        rebirthView.Open(kind, state);
+    }
+
+    internal void ConfirmRebirth(RebirthKind kind)
+    {
+        if (!isActiveAndEnabled || !rebirthView.IsOpen || !DiggingRebirth.TryExecute(kind, state))
             return;
 
-        ownedPotatoes -= AutoDigPrice;
-        autoDigPurchased = true;
-        nextAutoDigTime = Time.unscaledTimeAsDouble + AutoDigInterval;
-        RefreshInventoryDisplay();
+        SuspendDigging();
+        nextDigTime = 0;
+        lastDigTime = double.NegativeInfinity;
+        if (diggingFeedback != null) diggingFeedback.ResetPace();
+        rapidHarvests = false;
+        harvestAnimationStart = digWobbleStart = null;
+        if (potatoVisual != null) potatoVisual.localRotation = buriedLocalRotation;
+        displayedProgress = 0;
+        digProgressSlider.SetValueWithoutNotify(0);
+        SetVisualLift(0);
         RequestSave(Time.unscaledTimeAsDouble, immediately: true);
+        rebirthView.Close();
+        upgradePanel.SetActive(false);
+        RefreshInventoryDisplay();
     }
 
     public void OnPointerDown(PointerEventData eventData)
     {
-        if (!isActiveAndEnabled || !Application.isFocused || !IsDiggingAvailable() || heldDevice != null ||
+        if (!isActiveAndEnabled || IsModalOpen || !Application.isFocused || !foreground || heldDevice != null ||
             eventData.button != PointerEventData.InputButton.Left ||
             !(eventData is ExtendedPointerEventData pointer))
         {
@@ -206,7 +258,8 @@ public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPoin
         heldDevice = pointer.device;
         heldPointerId = pointer.pointerId;
         heldTouchId = pointer.touchId;
-        TryManualDig(Time.unscaledTimeAsDouble);
+        AdvanceFertilizerClock();
+        TryManualDig(Time.unscaledTimeAsDouble, heldRepeat: false);
     }
 
     public void OnPointerUp(PointerEventData eventData)
@@ -222,29 +275,44 @@ public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPoin
     private void LateUpdate()
     {
         double now = Time.unscaledTimeAsDouble;
+        if (diggingFeedback != null && diggingFeedback.UpdatePace(now) != rapidHarvests)
+        {
+            rapidHarvests = diggingFeedback.IsRapid;
+            harvestAnimationStart = digWobbleStart = null;
+            if (potatoVisual != null) potatoVisual.localRotation = buriedLocalRotation;
+            SetVisualLift(DigLift);
+        }
         UpdateHarvestAnimation(now);
         UpdateDigWobble(now);
+        float targetProgress = state.Progress.FractionOf(state.Target);
+        displayedProgress = Mathf.Lerp(displayedProgress, targetProgress, 1f - Mathf.Exp(-20f * Time.unscaledDeltaTime));
+        digProgressSlider.SetValueWithoutNotify(displayedProgress);
 
-        if (!IsDiggingAvailable())
-        {
-            SuspendDigging();
+        SetForeground(IsForeground());
+        if (!foreground) return;
+        AdvanceFertilizerClock();
+
+        if (saveDirty && now >= nextAutosaveTime)
+            SaveIfDirty();
+        else if (now >= nextClockCheckpoint)
+            RequestSave(now, immediately: true);
+        if (IsModalOpen)
             return;
-        }
 
         // Read the same pointer after EventSystem has processed this frame's releases.
         if (heldDevice != null)
         {
             if (Application.isFocused && heldDevice.added && IsHeldPointerPressed())
-                TryManualDig(now);
+                TryManualDig(now, heldRepeat: true);
             else
                 ReleaseHold();
         }
 
-        if (autoDigPurchased)
+        if (state.Level(DigUpgrade.Auto) > 0)
             TryAutoDig(now);
 
-        if (saveDirty && now >= nextAutosaveTime)
-            SaveIfDirty();
+        if (state.PendingHits.Count > 0 || !state.Carry.IsZero)
+            ApplyDig(now);
     }
 
     private bool IsHeldPointerPressed()
@@ -258,55 +326,60 @@ public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPoin
                heldTouch.startTime.ReadValue() == heldTouchStartTime;
     }
 
-    private void TryManualDig(double now)
+    private double ManualInterval => state.Fertilizer.IsBoosted ? DigInterval / FertilizerState.BoostSpeed : DigInterval;
+
+    private void UpdateManualInterval() => nextDigTime = lastDigTime + ManualInterval;
+
+    private void TryManualDig(double now, bool heldRepeat)
     {
-        if (now < nextDigTime)
+        double interval = ManualInterval;
+        if (now < nextDigTime || (!heldRepeat && now < lastDigTime + interval))
             return;
 
-        // Schedule from this dig so a delayed frame can never cause a burst.
-        nextDigTime = now + DigInterval;
-        ApplyDig(now);
+        // Preserve the boosted hold cadence across ordinary frame boundaries. A missed
+        // interval, or lifting and pressing again, always reanchors it to the new hit.
+        double nextTick = nextDigTime + interval;
+        nextDigTime = state.Fertilizer.IsBoosted && heldRepeat && nextTick > now
+            ? nextTick : now + interval;
+        lastDigTime = now;
+        var power = DiggingEconomy.Power(state.Level(DigUpgrade.Power), state.PrestigeMultiplier);
+        double chance = DiggingEconomy.CriticalChance(state.Level(DigUpgrade.Critical), state.PrestigeMultiplier);
+        if (UnityEngine.Random.value < chance)
+            power = power.Multiply(DiggingEconomy.CriticalMultiplier);
+        state.PendingHits.Enqueue(power);
     }
 
     private void TryAutoDig(double now)
     {
-        nextAutoDigTime ??= now + AutoDigInterval;
+        nextAutoDigTime ??= now + DiggingEconomy.AutoInterval;
         if (now < nextAutoDigTime.Value)
             return;
 
-        nextAutoDigTime = now + AutoDigInterval;
-        ApplyDig(now);
+        double nextTick = nextAutoDigTime.Value + DiggingEconomy.AutoInterval;
+        nextAutoDigTime = nextTick > now ? nextTick : now + DiggingEconomy.AutoInterval;
+        double speed = state.Fertilizer.IsBoosted ? FertilizerState.BoostSpeed : 1;
+        state.PendingHits.Enqueue(DiggingEconomy.AutoPerSecond(state.Level(DigUpgrade.Auto), state.PrestigeMultiplier)
+            .Multiply(DiggingEconomy.AutoInterval * speed));
     }
 
     private void ApplyDig(double now)
     {
-        int power = DigPower;
-        bool harvested = requiredDigAmount - digProgress <= power;
-        int earnedPotatoes = 0;
+        DigBatch batch = state.ApplyPending();
+        bool harvested = batch.Harvests > 0;
         if (harvested)
         {
-            harvestedCount++;
-            int previousBalance = ownedPotatoes;
-            ownedPotatoes++;
-            earnedPotatoes = ownedPotatoes - previousBalance;
-            digProgress = 0;
-            // ceil(requiredDigAmount * 1.2), using integer arithmetic.
-            requiredDigAmount = (int)Math.Min(int.MaxValue, (requiredDigAmount * 6L + 4) / 5);
-            if (potatoVisual != null)
+            displayedProgress = 0;
+            digProgressSlider.SetValueWithoutNotify(0);
+            if (potatoVisual != null && !rapidHarvests)
                 harvestAnimationStart = now;
 
             RefreshInventoryDisplay();
         }
-        else
-        {
-            digProgress += power;
-        }
 
-        RefreshDigDisplay();
-        digWobbleStart = now;
+        if (!rapidHarvests) digWobbleStart = now;
         UpdateDigWobble(now);
         if (diggingFeedback != null)
-            diggingFeedback.PlayDig(earnedPotatoes);
+            diggingFeedback.PlayDig(batch, now);
         if (harvestAnimationStart.HasValue)
             UpdateHarvestAnimation(now);
         else
@@ -315,7 +388,7 @@ public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPoin
         RequestSave(now, immediately: harvested);
     }
 
-    private float DigLift => FullDigLift * ((float)digProgress / requiredDigAmount);
+    private float DigLift => FullDigLift * (rapidHarvests ? 0.6f : state.Progress.FractionOf(state.Target));
 
     private void UpdateHarvestAnimation(double now)
     {
@@ -360,78 +433,28 @@ public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPoin
         potatoVisual.localRotation = buriedLocalRotation * Quaternion.Euler(turn * 0.35f, 0f, turn);
     }
 
-    private void RefreshDigDisplay()
-    {
-        digProgressSlider.maxValue = requiredDigAmount;
-        digProgressSlider.SetValueWithoutNotify(digProgress);
-        digAmountText.text = $"{digProgress} / {requiredDigAmount}";
-    }
-
     private void RefreshInventoryDisplay()
     {
-        harvestCountText.text = $"収穫累計  {harvestedCount}";
-        ownedPotatoesText.text = $"所持芋  {ownedPotatoes}";
-        firstDigHint.SetActive(harvestedCount == 0);
-
-        shovelDetailsText.text = $"現在の掘削力  {DigPower}";
-        if (!ShovelAtMaxLevel)
-        {
-            var nextUpgrade = ShovelUpgrades[shovelLevel];
-            shovelDetailsText.text += $"\n次の掘削力  {nextUpgrade.Power}\n価格  芋 {nextUpgrade.Price}個";
-        }
-
-        buyShovelButton.interactable = CanBuyShovel;
-        buyShovelButtonText.text = ShovelAtMaxLevel ? "最大レベル" : CanBuyShovel ? "購入" : "芋が不足";
+        ownedPotatoesText.text = $"所持芋  {state.Wallet.Format()}";
+        firstDigHint.SetActive(state.HarvestCount.IsZero);
+        foreach (var card in upgradeCards)
+            card.Refresh(state.Level(card.Upgrade), state.CanBuy(card.Upgrade), state.PrestigeMultiplier);
+        rebirthView.Refresh(state);
         RefreshFirstShovelUpgradeBadge();
-
-        autoDigSection.SetActive(AutoDigUnlocked);
-        buyAutoDigButton.interactable = CanBuyAutoDig;
-        buyAutoDigButtonText.text = autoDigPurchased ? "稼働中" : CanBuyAutoDig ? "購入" : "芋が不足";
     }
 
     private void RefreshFirstShovelUpgradeBadge()
     {
-        firstShovelUpgradeBadge.SetActive(shovelLevel == 0 && CanBuyShovel && !upgradePanel.activeSelf);
-    }
-
-    private void LoadSave()
-    {
-        if (!PlayerPrefs.HasKey(SaveKey))
-            return;
-
-        var data = new SaveData();
-        try
-        {
-            JsonUtility.FromJsonOverwrite(PlayerPrefs.GetString(SaveKey), data);
-        }
-        catch (ArgumentException)
-        {
-            Debug.LogWarning("OIMO-DIG could not read the local save. Starting with default progress.", this);
-            return;
-        }
-
-        if (data.version != SaveVersion || data.harvestedCount < 0 ||
-            data.ownedPotatoes < 0 || data.ownedPotatoes > data.harvestedCount ||
-            data.shovelLevel < 0 || data.shovelLevel > ShovelUpgrades.Length ||
-            data.autoDigPurchased < 0 || data.autoDigPurchased > 1 ||
-            (data.autoDigPurchased == 1 && data.harvestedCount < AutoDigUnlockHarvests) ||
-            data.requiredDigAmount < InitialRequiredDigAmount ||
-            data.digProgress < 0 || data.digProgress >= data.requiredDigAmount)
-        {
-            Debug.LogWarning("OIMO-DIG local save is invalid or uses an unsupported version. Starting with default progress.", this);
-            return;
-        }
-
-        ownedPotatoes = data.ownedPotatoes;
-        harvestedCount = data.harvestedCount;
-        shovelLevel = data.shovelLevel;
-        autoDigPurchased = data.autoDigPurchased == 1;
-        digProgress = data.digProgress;
-        requiredDigAmount = data.requiredDigAmount;
+        firstShovelUpgradeBadge.SetActive(state.Level(DigUpgrade.Power) == 0 &&
+            state.CanBuy(DigUpgrade.Power) && !upgradePanel.activeSelf);
     }
 
     private void RequestSave(double now, bool immediately)
     {
+        nextClockCheckpoint = now + ClockCheckpointInterval;
+        if (!canSave)
+            return;
+
         if (!saveDirty)
         {
             saveDirty = true;
@@ -447,21 +470,10 @@ public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPoin
         if (!saveDirty)
             return;
 
-        var data = new SaveData
-        {
-            version = SaveVersion,
-            ownedPotatoes = ownedPotatoes,
-            harvestedCount = harvestedCount,
-            shovelLevel = shovelLevel,
-            autoDigPurchased = autoDigPurchased ? 1 : 0,
-            digProgress = digProgress,
-            requiredDigAmount = requiredDigAmount
-        };
-
         try
         {
-            PlayerPrefs.SetString(SaveKey, JsonUtility.ToJson(data));
-            PlayerPrefs.Save();
+            if (foreground) state.Fertilizer.Checkpoint(DateTime.UtcNow.Ticks);
+            DiggingSave.Save(state);
             saveDirty = false;
         }
         catch (PlayerPrefsException exception)
@@ -471,57 +483,78 @@ public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPoin
         }
     }
 
-    private bool IsDiggingAvailable()
+    private bool IsForeground()
     {
 #if UNITY_WEBGL && !UNITY_EDITOR
-        // A tab can become visible again without the Unity canvas regaining focus.
-        int visibility = OimoDigGetPageVisibility();
-        if (visibility != pageVisibility)
-        {
-            pageVisibility = visibility;
-            SuspendDigging();
-            if (visibility < 0)
-                SaveIfDirty();
-        }
-
-        return visibility > 0;
+        return OimoDigGetPageVisibility() > 0;
 #else
         return Application.isFocused && !applicationPaused;
 #endif
     }
 
+    private void SetForeground(bool visible)
+    {
+        if (state == null || foreground == visible) return;
+        long utcTicks = DateTime.UtcNow.Ticks;
+        if (visible)
+        {
+            state.Fertilizer.AccrueAwayTime(utcTicks);
+            lastFertilizerTick = Time.realtimeSinceStartupAsDouble;
+        }
+        else
+        {
+            AdvanceFertilizerClock();
+            state.Fertilizer.Checkpoint(utcTicks);
+        }
+        foreground = visible;
+        SuspendDigging();
+        CommitFertilizerUpdate();
+    }
+
+    private void AdvanceFertilizerClock()
+    {
+        if (!foreground) return;
+        double now = Time.realtimeSinceStartupAsDouble;
+        double delta = Math.Max(0, now - lastFertilizerTick);
+        lastFertilizerTick = now;
+        if (!state.Fertilizer.SpendBoostTime(delta)) return;
+        if (!state.Fertilizer.IsBoosted) UpdateManualInterval();
+        RequestSave(Time.unscaledTimeAsDouble, immediately: !state.Fertilizer.IsBoosted);
+        fertilizerView.RefreshTimer(state.Fertilizer);
+    }
+
     private void OnApplicationFocus(bool hasFocus)
     {
-        if (hasFocus)
-            return;
-
 #if UNITY_WEBGL && !UNITY_EDITOR
-        ReleaseHold();
+        if (!hasFocus)
+        {
+            ReleaseHold();
+            AdvanceFertilizerClock();
+            SaveIfDirty();
+        }
 #else
-        SuspendDigging();
+        SetForeground(hasFocus && !applicationPaused);
 #endif
-        SaveIfDirty();
     }
 
     private void OnApplicationPause(bool isPaused)
     {
 #if !UNITY_WEBGL || UNITY_EDITOR
         applicationPaused = isPaused;
+        SetForeground(IsForeground());
+#else
+        if (isPaused) SetForeground(IsForeground());
 #endif
-        if (isPaused)
-        {
-            SuspendDigging();
-            SaveIfDirty();
-        }
     }
 
     private void OnDisable()
     {
+        SetForeground(false);
         SaveIfDirty();
 #if UNITY_WEBGL && !UNITY_EDITOR
         if (webSaveOwner == this)
         {
-            OimoDigSetPageSaveCallback(null);
+            OimoDigSetPageVisibilityCallback(null);
             webSaveOwner = null;
         }
 #endif
