@@ -17,6 +17,18 @@ internal readonly struct DigBatch
     }
 }
 
+internal readonly struct PendingDig
+{
+    public readonly LargeNumber Amount;
+    public readonly LargeNumber StrikeSize;
+
+    public PendingDig(LargeNumber amount, LargeNumber strikeSize = default)
+    {
+        Amount = amount;
+        StrikeSize = amount > strikeSize ? strikeSize : default;
+    }
+}
+
 public static class DiggingEconomy
 {
     public const int UpgradeCount = 5;
@@ -43,7 +55,7 @@ public static class DiggingEconomy
 
     public static LargeNumber Power(long level, double prestigeMultiplier)
         => BoostAboveBase(LevelGrowth(2, level), prestigeMultiplier);
-    public static LargeNumber AutoPerSecond(long level, double prestigeMultiplier)
+    public static LargeNumber AutoHitsPerSecond(long level, double prestigeMultiplier)
         => level == 0 ? default : LevelGrowth(1.85, level - 1).Multiply(0.5 * prestigeMultiplier);
     public static double CriticalChance(long level, double prestigeMultiplier)
         => Rate(level * prestigeMultiplier, 0.05, 0.95);
@@ -89,16 +101,25 @@ internal sealed class DiggingProgress
     public LargeNumber Progress;
     public LargeNumber Target = DiggingEconomy.InitialTarget;
     public readonly long[] Levels = new long[DiggingEconomy.UpgradeCount];
-    public readonly Queue<LargeNumber> PendingHits = new();
+    public readonly LinkedList<PendingDig> PendingHits = new();
     public LargeNumber Carry;
     public LargeNumber CycleBest;
     public long PrestigeExponent;
     public long ImofinityCount;
     public readonly FertilizerState Fertilizer = new();
     public double PrestigeMultiplier => DiggingRebirth.Multiplier(PrestigeExponent);
+    public LargeNumber ManualPower => DiggingEconomy.Power(Level(DigUpgrade.Power), PrestigeMultiplier);
 
     public long Level(DigUpgrade upgrade) => Levels[(int)upgrade];
     public bool CanBuy(DigUpgrade upgrade) => Wallet >= DiggingEconomy.Price(upgrade, Level(upgrade));
+
+    public void QueueManualDig(LargeNumber amount) => PendingHits.AddLast(new PendingDig(amount));
+
+    public void QueueAutoDig(LargeNumber strikeSize, LargeNumber strikes)
+    {
+        if (!strikes.IsZero)
+            PendingHits.AddLast(new PendingDig(strikeSize * strikes, strikeSize));
+    }
 
     public bool Buy(DigUpgrade upgrade)
     {
@@ -120,7 +141,7 @@ internal sealed class DiggingProgress
         {
             if (Carry.IsZero && PendingHits.Count == 0) break;
             bool freshStrike = Carry.IsZero;
-            LargeNumber hit = freshStrike ? PendingHits.Dequeue() : Carry;
+            LargeNumber hit = freshStrike ? TakeDigAmount() : Carry;
             Carry = default;
             LargeNumber total = Progress + hit;
             if (total < Target)
@@ -143,6 +164,29 @@ internal sealed class DiggingProgress
             Carry = surplus.Multiply(rate);
         }
         return new DigBatch(earned, harvests, harvestingStrikes);
+    }
+
+    private LargeNumber TakeDigAmount()
+    {
+        var head = PendingHits.First;
+        PendingDig work = head.Value;
+        LargeNumber needed = Target - Progress;
+        if (!work.StrikeSize.IsZero && work.Amount > needed)
+        {
+            // Skip whole strikes on the same potato. Only the strike that reaches
+            // the target can overflow into Carry. Untouched strikes remain queued.
+            LargeNumber throughHarvest = (needed / work.StrikeSize).Ceiling() * work.StrikeSize;
+            if (throughHarvest < needed) throughHarvest = needed;
+            LargeNumber remaining = work.Amount - throughHarvest;
+            if (!remaining.IsZero)
+            {
+                head.Value = new PendingDig(remaining, work.StrikeSize);
+                return throughHarvest;
+            }
+        }
+
+        PendingHits.RemoveFirst();
+        return work.Amount;
     }
 
     public void ResetRun(long initialLevel)

@@ -91,6 +91,13 @@ public readonly struct LargeNumber : IComparable<LargeNumber>
     public static LargeNumber operator *(LargeNumber a, LargeNumber b)
         => a.IsZero || b.IsZero ? default : Normalize(a.significand * b.significand, a.Exponent + b.Exponent);
 
+    public static LargeNumber operator /(LargeNumber dividend, LargeNumber divisor)
+    {
+        if (divisor.IsZero) throw new DivideByZeroException();
+        return dividend.IsZero ? default :
+            Normalize(dividend.significand / divisor.significand, dividend.Exponent - divisor.Exponent);
+    }
+
     public LargeNumber Multiply(double scale) => this * From(scale);
 
     private static bool CanUseDecimal(LargeNumber a, LargeNumber b)
@@ -106,6 +113,15 @@ public readonly struct LargeNumber : IComparable<LargeNumber>
         double value = significand * Math.Pow(10, Exponent);
         double nearest = Math.Round(value);
         return From(Math.Abs(value - nearest) <= Math.Max(1, value) * 1e-15 ? nearest : Math.Ceiling(value));
+    }
+
+    internal LargeNumber Floor()
+    {
+        if (IsZero || Exponent < 0) return default;
+        if (Exponent >= 15) return this;
+        double value = significand * Math.Pow(10, Exponent);
+        double nearest = Math.Round(value);
+        return From(Math.Abs(value - nearest) <= Math.Max(1, value) * 1e-15 ? nearest : Math.Floor(value));
     }
 
     public float FractionOf(LargeNumber total)
@@ -134,11 +150,15 @@ public readonly struct LargeNumber : IComparable<LargeNumber>
         return true;
     }
 
-    public string Format()
+    public string Format() => Format("0.###");
+
+    internal string FormatRate() => Format("0.00#");
+
+    private string Format(string fixedPointFormat)
     {
-        if (IsZero) return "0";
+        if (IsZero) return 0d.ToString(fixedPointFormat, Invariant);
         if (Exponent >= -3 && Exponent < 6)
-            return (significand * Math.Pow(10, Exponent)).ToString("0.###", Invariant);
+            return (significand * Math.Pow(10, Exponent)).ToString(fixedPointFormat, Invariant);
         return significand.ToString("0.##", Invariant) + "e" + Exponent.ToString(Invariant);
     }
 

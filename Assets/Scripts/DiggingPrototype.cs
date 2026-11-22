@@ -10,6 +10,7 @@ using UnityEngine.UI;
 public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPointerUpHandler
 {
     private const double DigInterval = 0.25;
+    private const int IndividuallyRolledAutoStrikes = 64;
     private const double AutosaveInterval = 3.0;
     private const double ClockCheckpointInterval = 15.0;
     private const double HarvestAnimationDuration = 0.18;
@@ -148,6 +149,7 @@ public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPoin
         UpdateManualInterval();
         fertilizerView.Close();
         CommitFertilizerUpdate();
+        RefreshUpgradeCards();
     }
 
     internal void BuyFertilizerCapacity()
@@ -342,12 +344,18 @@ public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPoin
         nextDigTime = state.Fertilizer.IsBoosted && heldRepeat && nextTick > now
             ? nextTick : now + interval;
         lastDigTime = now;
-        var power = DiggingEconomy.Power(state.Level(DigUpgrade.Power), state.PrestigeMultiplier);
-        double chance = DiggingEconomy.CriticalChance(state.Level(DigUpgrade.Critical), state.PrestigeMultiplier);
-        if (UnityEngine.Random.value < chance)
+        var power = state.ManualPower;
+        if (RollCritical(CriticalChance))
             power = power.Multiply(DiggingEconomy.CriticalMultiplier);
-        state.PendingHits.Enqueue(power);
+        state.QueueManualDig(power);
     }
+
+    private double CriticalChance => DiggingEconomy.CriticalChance(
+        state.Level(DigUpgrade.Critical), state.PrestigeMultiplier);
+
+    private static bool RollCritical(double chance) => chance > 0 && UnityEngine.Random.value < chance;
+
+    private double AutoSpeedMultiplier => state.Fertilizer.IsBoosted ? FertilizerState.BoostSpeed : 1;
 
     private void TryAutoDig(double now)
     {
@@ -357,9 +365,48 @@ public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPoin
 
         double nextTick = nextAutoDigTime.Value + DiggingEconomy.AutoInterval;
         nextAutoDigTime = nextTick > now ? nextTick : now + DiggingEconomy.AutoInterval;
-        double speed = state.Fertilizer.IsBoosted ? FertilizerState.BoostSpeed : 1;
-        state.PendingHits.Enqueue(DiggingEconomy.AutoPerSecond(state.Level(DigUpgrade.Auto), state.PrestigeMultiplier)
-            .Multiply(DiggingEconomy.AutoInterval * speed));
+        var hitCount = DiggingEconomy.AutoHitsPerSecond(state.Level(DigUpgrade.Auto), state.PrestigeMultiplier)
+            .Multiply(DiggingEconomy.AutoInterval * AutoSpeedMultiplier);
+        QueueAutoStrikes(state.ManualPower, hitCount, CriticalChance);
+    }
+
+    private void QueueAutoStrikes(LargeNumber power, LargeNumber hitCount, double chance)
+    {
+        if (chance <= 0)
+        {
+            state.QueueAutoDig(power, hitCount);
+            return;
+        }
+
+        LargeNumber criticalPower = power.Multiply(DiggingEconomy.CriticalMultiplier);
+        LargeNumber wholeHits = hitCount.Floor();
+        LargeNumber fraction = hitCount - wholeHits;
+        for (int i = 0; i < IndividuallyRolledAutoStrikes && !wholeHits.IsZero; i++)
+        {
+            state.QueueAutoDig(RollCritical(chance) ? criticalPower : power, LargeNumber.One);
+            wholeHits -= LargeNumber.One;
+        }
+
+        if (!wholeHits.IsZero)
+        {
+            // At high speeds, stochastically round the expected critical count
+            // and keep separate strike sizes so each group still uses normal carry.
+            LargeNumber criticalHits = (wholeHits.Multiply(chance) + LargeNumber.From(UnityEngine.Random.value)).Floor();
+            LargeNumber normalHits = wholeHits - criticalHits;
+            if (RollCritical(0.5))
+            {
+                state.QueueAutoDig(criticalPower, criticalHits);
+                state.QueueAutoDig(power, normalHits);
+            }
+            else
+            {
+                state.QueueAutoDig(power, normalHits);
+                state.QueueAutoDig(criticalPower, criticalHits);
+            }
+        }
+
+        if (!fraction.IsZero)
+            state.QueueAutoDig(RollCritical(chance) ? criticalPower : power, fraction);
     }
 
     private void ApplyDig(double now)
@@ -437,10 +484,17 @@ public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPoin
     {
         ownedPotatoesText.text = $"所持芋  {state.Wallet.Format()}";
         firstDigHint.SetActive(state.HarvestCount.IsZero);
-        foreach (var card in upgradeCards)
-            card.Refresh(state.Level(card.Upgrade), state.CanBuy(card.Upgrade), state.PrestigeMultiplier);
+        RefreshUpgradeCards();
         rebirthView.Refresh(state);
         RefreshFirstShovelUpgradeBadge();
+    }
+
+    private void RefreshUpgradeCards()
+    {
+        var power = state.ManualPower;
+        foreach (var card in upgradeCards)
+            card.Refresh(state.Level(card.Upgrade), state.CanBuy(card.Upgrade), state.PrestigeMultiplier,
+                power, AutoSpeedMultiplier);
     }
 
     private void RefreshFirstShovelUpgradeBadge()
@@ -518,7 +572,11 @@ public sealed class DiggingPrototype : MonoBehaviour, IPointerDownHandler, IPoin
         double delta = Math.Max(0, now - lastFertilizerTick);
         lastFertilizerTick = now;
         if (!state.Fertilizer.SpendBoostTime(delta)) return;
-        if (!state.Fertilizer.IsBoosted) UpdateManualInterval();
+        if (!state.Fertilizer.IsBoosted)
+        {
+            UpdateManualInterval();
+            RefreshUpgradeCards();
+        }
         RequestSave(Time.unscaledTimeAsDouble, immediately: !state.Fertilizer.IsBoosted);
         fertilizerView.RefreshTimer(state.Fertilizer);
     }

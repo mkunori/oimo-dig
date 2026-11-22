@@ -18,10 +18,14 @@ public sealed class DigUpgradeCard : MonoBehaviour
         purchase.onClick.AddListener(() => digging.BuyUpgrade(upgrade));
     }
 
-    public void Refresh(long level, bool affordable, double prestigeMultiplier)
+    public void Refresh(long level, bool affordable, double prestigeMultiplier, LargeNumber manualPower,
+        double autoSpeedMultiplier)
     {
         title.text = $"{Names[(int)upgrade]}  Lv.{level}";
-        details.text = $"{Effect(level, prestigeMultiplier)} → {Effect(level + 1, prestigeMultiplier)}\n価格  芋 {DiggingEconomy.Price(upgrade, level).Format()}個";
+        string effect = upgrade == DigUpgrade.Auto
+            ? AutoEffect(level, prestigeMultiplier, manualPower, autoSpeedMultiplier)
+            : $"{Effect(level, prestigeMultiplier)} → {Effect(level + 1, prestigeMultiplier)}";
+        details.text = $"{effect}\n価格  芋 {DiggingEconomy.Price(upgrade, level).Format()}個";
         purchase.interactable = affordable;
         purchaseLabel.text = affordable ? "購入" : "芋が不足";
     }
@@ -31,11 +35,18 @@ public sealed class DigUpgradeCard : MonoBehaviour
         switch (upgrade)
         {
             case DigUpgrade.Power: return DiggingEconomy.Power(level, multiplier).Format() + " / 回";
-            case DigUpgrade.Auto: return DiggingEconomy.AutoPerSecond(level, multiplier).Format() + " / 秒";
             case DigUpgrade.Critical: return Percent(DiggingEconomy.CriticalChance(level, multiplier)) + " (5x)";
             case DigUpgrade.Carry: return Percent(DiggingEconomy.CarryRate(level, multiplier));
             default: return "×" + DiggingEconomy.LuckMultiplier(level, multiplier).Format();
         }
+    }
+
+    private static string AutoEffect(long level, double prestigeMultiplier, LargeNumber power, double speedMultiplier)
+    {
+        var speed = DiggingEconomy.AutoHitsPerSecond(level, prestigeMultiplier).Multiply(speedMultiplier);
+        var nextSpeed = DiggingEconomy.AutoHitsPerSecond(level + 1, prestigeMultiplier).Multiply(speedMultiplier);
+        return $"自動掘り速度  {speed.FormatRate()} → {nextSpeed.FormatRate()}回/秒\n" +
+            $"自動掘削量(通常)  {(power * speed).FormatRate()} → {(power * nextSpeed).FormatRate()}/秒";
     }
 
     private static string Percent(double rate) => LargeNumber.From(rate * 100).Format() + "%";

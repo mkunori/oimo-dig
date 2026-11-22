@@ -38,6 +38,7 @@ internal static class DiggingSave
         public string wallet, earned, harvestCount, progress, target, carry;
         public long[] levels;
         public string[] pendingHits;
+        public string[] pendingHitStrikeSizes;
         public string cycleBest;
         public long prestigeExponent, imofinityCount;
         public string fertilizerBalance;
@@ -76,11 +77,18 @@ internal static class DiggingSave
                     return false;
 
                 Array.Copy(saved.levels, loaded.Levels, saved.levels.Length);
-                foreach (string item in saved.pendingHits)
+                string[] strikeSizes = saved.pendingHitStrikeSizes;
+                bool hasStrikeSizes = strikeSizes != null && strikeSizes.Length > 0;
+                if (hasStrikeSizes && strikeSizes.Length != saved.pendingHits.Length)
+                    return false;
+                for (int i = 0; i < saved.pendingHits.Length; i++)
                 {
-                    if (!LargeNumber.TryDecode(item, out LargeNumber hit) || hit.IsZero)
+                    if (!LargeNumber.TryDecode(saved.pendingHits[i], out LargeNumber hit) || hit.IsZero)
                         return false;
-                    loaded.PendingHits.Enqueue(hit);
+                    LargeNumber strikeSize = default;
+                    if (hasStrikeSizes && (!LargeNumber.TryDecode(strikeSizes[i], out strikeSize) || strikeSize >= hit))
+                        return false;
+                    loaded.PendingHits.AddLast(new PendingDig(hit, strikeSize));
                 }
 
                 if (expectedVersion == 2)
@@ -147,9 +155,13 @@ internal static class DiggingSave
     public static void Save(DiggingProgress state)
     {
         var pending = new string[state.PendingHits.Count];
+        var strikeSizes = new string[pending.Length];
         int index = 0;
-        foreach (var hit in state.PendingHits)
-            pending[index++] = hit.Encode();
+        foreach (var work in state.PendingHits)
+        {
+            pending[index] = work.Amount.Encode();
+            strikeSizes[index++] = work.StrikeSize.Encode();
+        }
 
         var saved = new Snapshot
         {
@@ -162,6 +174,7 @@ internal static class DiggingSave
             carry = state.Carry.Encode(),
             levels = state.Levels,
             pendingHits = pending,
+            pendingHitStrikeSizes = strikeSizes,
             cycleBest = state.CycleBest.Encode(),
             prestigeExponent = state.PrestigeExponent,
             imofinityCount = state.ImofinityCount,
